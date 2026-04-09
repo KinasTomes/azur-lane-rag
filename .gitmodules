@@ -1,0 +1,3 @@
+[submodule "AzurLaneData"]
+	path = AzurLaneData
+	url = git@github.com:MrLar/AzurLaneData.git
