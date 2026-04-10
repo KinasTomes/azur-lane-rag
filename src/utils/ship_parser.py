@@ -13,67 +13,44 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 class ShipDataParser:
-    # ... (SHIP_SCHEMA_EXAMPLE and SYSTEM_PROMPT remain unchanged)
     SHIP_SCHEMA_EXAMPLE = {
-        "node_type": "Ship",
-        "id": 727,
-        "name": "Moskva",
-        "global_name": "SN Moskva",
-        "rarity": "Ultra Rare",
-        "release_date": "2026-02-26",
-        "attributes": {
-            "faction": "Northern",
-            "hull": "CA",
-            "class": "Moskva"
-        },
+        "id": 12,
         "skills": [
             {
-                "id": 152150,
-                "name": "Unyielding Valor",
-                "type": ["ALLY_BUFF", "SELF_BUFF"],
+                "id": 30562,
+                "name": "All Out Assault II",
+                "type": ["BARRAGE"],
                 "edges": {
-                    "HAS_SKILL": 727,
+                    "HAS_SKILL": 12,
                     "AFFECTS": {
-                        "scope": "ally",
-                        "condition": {
-                            "faction": "Northern",
-                            "fleet_type": "surface"
-                        }
+                        "scope": "self",
+                        "condition": {}
                     }
                 }
             }
-        ],
-        "fleet_tech": {
-            "stat_bonus": "hp",
-            "applies_to_hulls": ["CA", "CB", "BM"]
-        },
-        "data_pointers": {
-            "stats": "sqlite:ship_stats WHERE ship_id=727",
-            "slots": "sqlite:ship_slots WHERE ship_id=727",
-            "acquisition": "sqlite:ships, ship_events WHERE id=727",
-            "skill_details": "vector_db:skill_152140, skill_152150, skill_152160"
-        }
+        ]
     }
 
     SYSTEM_PROMPT = f"""
-You are a specialized Azur Lane ship data extractor.
+You are a specialized Azur Lane skill analyzer.
 
 Your job:
-- Convert the provided ship summaries into a JSON array.
-- Do not output markdown, code fences, commentary, reasoning, or extra text.
-- Think silently. Return only the final JSON.
+- Analyze the provided ship skills and extract their types, scopes, and conditions.
+- Output a JSON array of objects, each representing a ship with its analyzed skills.
+- Do not output markdown, code fences, or any text other than the JSON.
 
 Output schema example:
-{json.dumps(SHIP_SCHEMA_EXAMPLE, indent=2, ensure_ascii=False)}
+{json.dumps([SHIP_SCHEMA_EXAMPLE], indent=2, ensure_ascii=False)}
+
+Skill Type Allowed List (Select one or more):
+- [BARRAGE, SELF_BUFF, ALLY_BUFF, FLEET_BUFF, HEAL, SHIELD, DEBUFF, SUPPORT, TANK, ASW, AVIATION, TORPEDO, ANTI_AIR, CROSS_FLEET, SURVIVABILITY, ACCURACY, RELOAD, AMMO_CHANGE, TRANSFORM, SLOW, STOP, ARMOR_BREAK, SHIELD_BYPASS, BURN, FLOOD, AVOID_DEATH, EVADE_RATE_BUFF, CRITICAL, LUCK_MANIPULATION, SPECIAL]
 
 Rules:
-1. Return a single JSON array.
-2. Preserve field names exactly as shown in the example.
-3. Use null for unknown scalar values, [] for unknown arrays, and {{}} for unknown objects.
-4. Infer skills[].type as an array of strings from the description (e.g., ["BARRAGE", "BUFF"]). If multiple effects exist, include all relevant types. Use ["UNKNOWN"] if unclear.
-5. Infer skills[].edges.AFFECTS.scope as "self", "ally", or "fleet"; use "unknown" if unclear.
-6. If a ship has no skill data, return "skills": [].
-7. Never include explanatory text, hidden reasoning, or markdown fences.
+1. Return a JSON array of ships. Each ship must have "id" and "skills" fields.
+2. Infer skills[].type as an array (e.g., ["BARRAGE", "BUFF", "HEAL"]).
+3. Infer skills[].edges.AFFECTS.scope as "self", "ally", "fleet", or "unknown".
+4. Infer skills[].edges.AFFECTS.condition as an object of specific triggers (use {{}} if none).
+5. Only reason about the skills. Do not invent other ship attributes.
 """.strip()
 
     def __init__(self, api_key: str = None, base_url: str = None, model: str = None):
@@ -90,8 +67,8 @@ Rules:
             api_key=self.api_key
         )
 
-    def _send_to_deepseek(self, messages: List[Dict[str, str]], max_retries: int = 3) -> str:
-        """Gửi yêu cầu đến DeepSeek API với cơ chế retry."""
+    def _send_to_llm(self, messages: List[Dict[str, str]], max_retries: int = 3) -> str:
+        """Gửi yêu cầu đến LLM API với cơ chế retry."""
         for attempt in range(max_retries):
             try:
                 completion = self.client.chat.completions.create(
@@ -199,28 +176,46 @@ Rules:
             raise ValueError(f"Invalid JSON: {str(last_error)}")
         return []
 
-    def parse_ship_summaries(self, ship_summaries: List[Dict[str, Any]], max_retries: int = 3) -> List[Dict[str, Any]]:
-        summary_texts = [s.get("summary", "") for s in ship_summaries]
-        summaries_str = "\n\n".join(summary_texts)
+    def parse_ship_summaries(self, ship_batch: List[Dict[str, Any]], max_retries: int = 3) -> List[Dict[str, Any]]:
+        # Chuẩn bị nội dung gửi LLM
+        reasoning_inputs = [s.get("reasoning_input", "") for s in ship_batch]
+        summaries_str = "\n\n".join(reasoning_inputs)
 
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "user", "content": f"Parse these ships:\n{summaries_str}"}
+            {"role": "user", "content": f"Analyze these skills:\n{summaries_str}"}
         ]
 
-        ship_ids = [s.get("id") for s in ship_summaries]
-        logger.info(f"Sending batch to LLM (IDs: {ship_ids})...")        
+        ship_ids = [s.get("id") for s in ship_batch]
+        logger.info(f"Sending batch for skill analysis (IDs: {ship_ids})...")        
         start_time = time.time()
 
         try:
-            response = self._send_to_deepseek(messages, max_retries)
+            response = self._send_to_llm(messages, max_retries)
             logger.info(f"Done! ({time.time() - start_time:.2f}s)")
-            parsed_results = self._parse_response(response)
             
-            # Inject tags from SQLite
-            return self._inject_tags_from_db(parsed_results)
+            # Phân tích kết quả từ LLM (chỉ chứa skills)
+            llm_results = self._parse_response(response)
+            llm_results_map = {item["id"]: item["skills"] for item in llm_results if "id" in item}
+            
+            # Gộp Hard Data với Skill Reasoning
+            final_ships = []
+            for ship_item in ship_batch:
+                sid = ship_item["id"]
+                hard_data = ship_item["hard_data"]
+                
+                # Lấy skills đã qua xử lý hoặc mặc định là mảng rỗng
+                reasoned_skills = llm_results_map.get(sid, [])
+                
+                # Merge
+                combined = hard_data.copy()
+                combined["skills"] = reasoned_skills
+                final_ships.append(combined)
+
+            # Inject tags từ DB và trả về
+            return self._inject_tags_from_db(final_ships)
         except Exception as e:
-            logger.error(f"Failed to parse batch {ship_ids}: {e}")
+            logger.error(f"Failed to process batch {ship_ids}: {e}")
             raise
 
     def _inject_tags_from_db(self, ships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

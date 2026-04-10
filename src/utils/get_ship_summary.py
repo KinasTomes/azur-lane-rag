@@ -47,10 +47,10 @@ def get_enhanced_summaries():
     with open(DATA_DIR / "ships.json", "r", encoding="utf-8") as f:
         ships_json = json.load(f)
 
-    # Loại bỏ release_date khỏi query chính
+    # Lấy thêm release_date từ bảng ships
     query = """
     SELECT 
-        s.id, s.name, s.global_name,
+        s.id, s.name, s.global_name, s.release_date,
         r.name as rarity, n.name as nation, h.name as hull, s.ship_class,
         ft.bonus_stat, ft.bonus_value
     FROM ships s
@@ -84,23 +84,48 @@ def get_enhanced_summaries():
         """, (ship_id, ship_id))
         skills = cursor.fetchall()
         
-        skill_texts = []
+        skill_payloads = []
         for sk in skills:
             desc = clean_skill_description(sk['description'], sk['id'], skills_json)
-            skill_texts.append(f"[ID: {sk['id']} | Name: {sk['name']} | Desc: {desc}]")
+            skill_payloads.append({
+                "id": sk['id'],
+                "name": sk['name'],
+                "description": desc
+            })
 
-        # Summary tập trung vào thuộc tính thực thể và kỹ năng (loại bỏ release, timer, pool)
-        summary = (
-            f"ID: {ship_id} | Name: {ship['name']} | Rarity: {ship['rarity']} | "
-            f"Nation: {ship['nation']} | Hull: {ship['hull']} | Class: {ship['ship_class']} | "
-            f"Fleet Tech: {ship['bonus_stat']} +{ship['bonus_value']} (Applies to: {', '.join(applies_to_names)}) | "
-            f"Skills: {' '.join(skill_texts)}"
-        )
-        
-        # data_pointer trỏ về DB để truy vấn chi tiết (stats, acquisition, v.v.) khi cần
+        # Format release_date từ DB (thường là ISO hoặc YYYY-MM-DD)
+        release_date = ship['release_date']
+        if release_date and " " in str(release_date): # Nếu có cả giờ thì cắt bỏ
+            release_date = release_date.split(" ")[0]
+
+        # Dữ liệu cứng (Hard Data) lấy trực tiếp từ DB
+        hard_data = {
+            "node_type": "Ship",
+            "id": ship_id,
+            "name": ship['name'],
+            "global_name": ship['global_name'],
+            "rarity": ship['rarity'],
+            "release_date": release_date,
+            "attributes": {
+                "faction": ship['nation'],
+                "hull": ship['hull'],
+                "class": ship['ship_class']
+            },
+            "fleet_tech": {
+                "stat_bonus": ship['bonus_stat'],
+                "applies_to_hulls": applies_to_names
+            }
+        }
+
+        # Nội dung rút gọn chỉ gửi Skills cho LLM reasoning
+        reasoning_input = f"Ship ID: {ship_id}\nSkills:\n"
+        for sp in skill_payloads:
+            reasoning_input += f"- [ID: {sp['id']} | Name: {sp['name']} | Desc: {sp['description']}]\n"
+
         ship_summaries.append({
-            "id": ship_id, 
-            "summary": summary
+            "id": ship_id,
+            "hard_data": hard_data,
+            "reasoning_input": reasoning_input
         })
 
     conn.close()
