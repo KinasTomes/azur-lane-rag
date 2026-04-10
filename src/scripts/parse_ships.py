@@ -138,9 +138,13 @@ def main(max_batches: Optional[int] = None, parallel: bool = False, workers: int
         if ship_id is None:
             pending_summaries.append(summary)
             continue
-
-        if ship_id in indexed_ship_ids:
-            continue
+            
+        try:
+            ship_id_int = int(ship_id)
+            if ship_id_int in indexed_ship_ids:
+                continue
+        except (ValueError, TypeError):
+            pass
 
         pending_summaries.append(summary)
 
