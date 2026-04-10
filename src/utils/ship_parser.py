@@ -1,10 +1,19 @@
 import json
+import os
 import re
 import time
+import logging
 from typing import List, Dict, Any, Iterator, Optional
 from openai import OpenAI
+from dotenv import load_dotenv
+
+# Load .env file if exists
+load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class ShipDataParser:
+    # ... (SHIP_SCHEMA_EXAMPLE and SYSTEM_PROMPT remain unchanged)
     SHIP_SCHEMA_EXAMPLE = {
         "node_type": "Ship",
         "id": 727,
@@ -67,10 +76,18 @@ Rules:
 7. Never include explanatory text, hidden reasoning, or markdown fences.
 """.strip()
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str = None, base_url: str = None, model: str = None):
+        # Ưu tiên tham số truyền vào, sau đó đến biến môi trường, cuối cùng là giá trị mặc định
+        self.api_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("NVIDIA_API_KEY")
+        self.base_url = base_url or os.getenv("LLM_BASE_URL") or "https://integrate.api.nvidia.com/v1"
+        self.model = model or os.getenv("LLM_MODEL") or "deepseek-ai/deepseek-v3.1"
+        
+        if not self.api_key:
+            logger.warning("LLM_API_KEY or NVIDIA_API_KEY is not set.")
+
         self.client = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=api_key
+            base_url=self.base_url,
+            api_key=self.api_key
         )
 
     def _send_to_deepseek(self, messages: List[Dict[str, str]], max_retries: int = 3) -> str:
@@ -78,7 +95,7 @@ Rules:
         for attempt in range(max_retries):
             try:
                 completion = self.client.chat.completions.create(
-                    model="deepseek-ai/deepseek-v3.1",
+                    model=self.model,
                     messages=messages,
                     temperature=0.1,
                     top_p=0.95,
@@ -88,6 +105,7 @@ Rules:
                 return completion.choices[0].message.content
             except Exception as e:
                 if attempt < max_retries - 1:
+                    logger.warning(f"Retrying API call ({attempt + 1}/{max_retries}) due to: {e}")
                     time.sleep(2 ** attempt)
                     continue
                 raise e
@@ -190,16 +208,20 @@ Rules:
             {"role": "user", "content": f"Parse these ships:\n{summaries_str}"}
         ]
 
-        print(f"🚀 Sending batch to Nvidia NIM (Batch size: {len(ship_summaries)})...", end="", flush=True)        
+        ship_ids = [s.get("id") for s in ship_summaries]
+        logger.info(f"Sending batch to LLM (IDs: {ship_ids})...")        
         start_time = time.time()
 
-        response = self._send_to_deepseek(messages, max_retries)
-
-        print(f" Done! ({time.time() - start_time:.2f}s)")
-        parsed_results = self._parse_response(response)
-
-        # Inject tags from SQLite
-        return self._inject_tags_from_db(parsed_results)
+        try:
+            response = self._send_to_deepseek(messages, max_retries)
+            logger.info(f"Done! ({time.time() - start_time:.2f}s)")
+            parsed_results = self._parse_response(response)
+            
+            # Inject tags from SQLite
+            return self._inject_tags_from_db(parsed_results)
+        except Exception as e:
+            logger.error(f"Failed to parse batch {ship_ids}: {e}")
+            raise
 
     def _inject_tags_from_db(self, ships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Truy vấn tags từ SQLite và inject vào attributes của mỗi tàu."""
@@ -210,9 +232,11 @@ Rules:
         db_path = repo_root / "src" / "azur_lane.db"
 
         if not db_path.exists():
+            logger.warning(f"DB not found at {db_path}, skipping tag injection.")
             return ships
 
         injected_ids = []
+        missing_ids = []
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
@@ -225,17 +249,20 @@ Rules:
                 row = cursor.fetchone()
                 if row and row[0]:
                     tags = json.loads(row[0])
-                    # Inject vào phần attributes
                     if "attributes" not in ship:
                         ship["attributes"] = {}
                     ship["attributes"]["tags"] = tags
                     injected_ids.append(ship_id)
+                else:
+                    missing_ids.append(ship_id)
 
             conn.close()
             if injected_ids:
-                print(f"✅ Injected tags for ships: {injected_ids}")
+                logger.info(f"Injected tags for: {injected_ids}")
+            if missing_ids:
+                logger.info(f"No tags found in DB for: {missing_ids}")
 
         except Exception as e:
-            print(f"⚠️ Failed to inject tags: {e}")
+            logger.error(f"Failed to inject tags: {e}")
 
         return ships

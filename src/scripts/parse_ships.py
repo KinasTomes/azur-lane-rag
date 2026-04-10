@@ -3,9 +3,48 @@ import os
 import json
 import time
 import argparse
+import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dotenv import load_dotenv
+
+# Load .env file if exists
+load_dotenv()
+
+# ANSI color codes
+CLR_RESET = "\033[0m"
+CLR_RED = "\033[31m"
+CLR_GREEN = "\033[32m"
+CLR_YELLOW = "\033[33m"
+CLR_CYAN = "\033[36m"
+CLR_BOLD = "\033[1m"
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger(__name__)
+
+# Custom formatter to add colors to level names
+class ColorFormatter(logging.Formatter):
+    LEVEL_COLORS = {
+        logging.INFO: CLR_GREEN,
+        logging.WARNING: CLR_YELLOW,
+        logging.ERROR: CLR_RED,
+        logging.DEBUG: CLR_CYAN
+    }
+
+    def format(self, record):
+        color = self.LEVEL_COLORS.get(record.levelno, CLR_RESET)
+        record.levelname = f"{color}{record.levelname}{CLR_RESET}"
+        return super().format(record)
+
+# Update existing handler
+for handler in logging.root.handlers:
+    handler.setFormatter(ColorFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -31,29 +70,44 @@ def collect_indexed_ship_ids(*directories: Path) -> set[int]:
 
 def process_batch(parser: ShipDataParser, batch: List[Dict[str, Any]], output_dir: Path, error_log: Path, batch_num: int):
     """Xử lý một batch và lưu kết quả."""
+    ship_ids = [s.get("id", "Unknown") for s in batch]
     try:
-        print(f"Processing batch {batch_num}...")
+        logger.info(f"Processing batch {batch_num} (IDs: {ship_ids})...")
         parsed_ships = parser.parse_ship_summaries(batch)
+        
         # Lưu từng tàu vào một file riêng
+        saved_ids = []
         for ship in parsed_ships:
             if isinstance(ship, dict) and "id" in ship:
                 ship_id = ship["id"]
                 ship_file = output_dir / f"{ship_id}.json"
                 with open(ship_file, "w", encoding="utf-8") as f:
                     json.dump(ship, f, ensure_ascii=False, indent=2)
+                saved_ids.append(ship_id)
+        
+        if saved_ids:
+            logger.info(f"Successfully saved ships: {saved_ids}")
+        
+        # Check if any ship from batch was not in parsed_results
+        missing_from_output = [sid for sid in ship_ids if sid not in saved_ids]
+        if missing_from_output:
+            logger.warning(f"Batch {batch_num}: Ships {missing_from_output} were not found in LLM output.")
+            
         return True
     except Exception as e:
         # Ghi log lỗi với thông tin các tàu trong batch
+        logger.error(f"Error processing batch {batch_num} (IDs: {ship_ids}): {e}")
         with open(error_log, "a", encoding="utf-8") as f:
-            ship_ids = [s.get("id", "Unknown") for s in batch]
-            f.write(f"Error processing ships {ship_ids} in batch {batch_num}: {str(e)}\n")
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error processing ships {ship_ids} in batch {batch_num}: {str(e)}\n")
         return False
 
 
 def main(max_batches: Optional[int] = None, parallel: bool = False, workers: int = 5):
-    api_key = os.environ.get("NVIDIA_API_KEY")
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("NVIDIA_API_KEY")
+    # Nếu không có api_key ở đây cũng không sao, parser sẽ tự lấy lại từ env hoặc cảnh báo.
+    # Tuy nhiên, vẫn nên giữ kiểm tra ở đây để dừng sớm nếu chắc chắn không có.
     if not api_key:
-        print("Error: NVIDIA_API_KEY not set")
+        logger.error("LLM_API_KEY or NVIDIA_API_KEY not set")
         sys.exit(1)
 
     # Ưu tiên output ở repo root, nhưng vẫn hỗ trợ legacy output trong src.
@@ -68,12 +122,12 @@ def main(max_batches: Optional[int] = None, parallel: bool = False, workers: int
     if not root_ids and legacy_ids:
         output_dir = legacy_output_dir
         output_dir.mkdir(exist_ok=True)
-        print(f"Detected existing indexed files in legacy output dir: {output_dir}")
+        logger.info(f"Detected existing indexed files in legacy output dir: {output_dir}")
 
     # File log lỗi
     error_log = output_dir / "error_log.txt"
 
-    parser = ShipDataParser(api_key)
+    parser = ShipDataParser(api_key=api_key)
     summaries = get_enhanced_summaries()
 
     indexed_ship_ids = collect_indexed_ship_ids(output_dir, legacy_output_dir)
@@ -90,7 +144,7 @@ def main(max_batches: Optional[int] = None, parallel: bool = False, workers: int
 
         pending_summaries.append(summary)
 
-    print(f"Total ships: {len(summaries)} | Indexed: {len(indexed_ship_ids)} | Pending: {len(pending_summaries)}")
+    logger.info(f"Total ships: {len(summaries)} | Indexed: {len(indexed_ship_ids)} | Pending: {len(pending_summaries)}")
 
     # Chia batch
     batch_size = 5
@@ -98,28 +152,31 @@ def main(max_batches: Optional[int] = None, parallel: bool = False, workers: int
 
     if max_batches is not None:
         batches = batches[:max_batches]
-        print(f"Limiting to {max_batches} batches.")
+        logger.info(f"Limiting to {max_batches} batches.")
 
     if not batches:
-        print("No pending ships to process.")
+        logger.info("No pending ships to process.")
         return
 
     if parallel:
-        print(f"🚀 Running in PARALLEL mode with {workers} workers.")
+        logger.info(f"Running in PARALLEL mode with {workers} workers.")
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_batch = {
                 executor.submit(process_batch, parser, batch, output_dir, error_log, idx + 1): idx 
                 for idx, batch in enumerate(batches)
             }
             for future in as_completed(future_to_batch):
-                future.result() # Đợi hoàn thành
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Future generated an exception: {e}")
     else:
-        print("🐢 Running in SEQUENTIAL mode.")
+        logger.info("Running in SEQUENTIAL mode.")
         for idx, batch in enumerate(batches):
             process_batch(parser, batch, output_dir, error_log, idx + 1)
             time.sleep(1) # Nghỉ ngắn giữa các batch ở chế độ tuần tự
 
-    print("All batches processed.")
+    logger.info("All batches processed.")
 
 if __name__ == "__main__":
     argument_parser = argparse.ArgumentParser(description="Parse Azur Lane ships in batches.")
