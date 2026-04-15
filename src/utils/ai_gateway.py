@@ -44,33 +44,39 @@ class AIGateway:
     }
 
     def __init__(self):
-        # Initialize OpenAI clients with NO auto-retries to handle concurrency better
+        # Initialize OpenAI clients with default retries
         self.nvidia_client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
             api_key=os.getenv("NVIDIA_API_KEY"),
-            max_retries=0 
+            max_retries=3 # Enable built-in retries
         )
         self.tp_client = OpenAI(
             base_url=os.getenv("THIRD_PARTY_BASE_URL"),
             api_key=os.getenv("THIRD_PARTY_API_KEY"),
-            max_retries=0
+            max_retries=3
         )
         self.cf_gateway_url = os.getenv("CF_GATEWAY_URL", "http://127.0.0.1:8787")
 
-    def embeddings(self, texts: List[str], model: str = "baai/bge-m3") -> List[List[float]]:
+    def embeddings(self, texts: List[str], model: str = "bge-m3") -> List[List[float]]:
         """
-        Fetch embeddings from NVIDIA API.
+        Fetch embeddings from the Cloudflare Worker gateway.
         """
         try:
-            response = self.nvidia_client.embeddings.create(
-                input=texts,
-                model=model,
-                encoding_format="float",
-                extra_body={"truncate": "NONE"}
-            )
-            return [data.embedding for data in response.data]
+            payload = {
+                "model": model,
+                "text": texts if len(texts) > 1 else texts[0]
+            }
+            response = requests.post(self.cf_gateway_url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Cloudflare Workers AI for bge-m3 returns { shape: [N, D], data: [[...]] }
+            if "data" in data:
+                return data["data"] if isinstance(data["data"][0], list) else [data["data"]]
+            
+            return data.get("result", {}).get("data", [])
         except Exception as e:
-            logger.error(f"NVIDIA Embedding Call Failed: {e}")
+            logger.error(f"Cloudflare Worker embeddings failed: {e}")
             raise
 
     def chat(self, model_id: str, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:

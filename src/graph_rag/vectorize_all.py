@@ -45,7 +45,7 @@ class AzurLaneVectorizer:
                 self.use_local = False
                 self.ai_gateway = AIGateway()
         else:
-            logger.info("Initializing AI Gateway for NVIDIA remote embeddings...")
+            logger.info("Initializing AI Gateway for Cloudflare remote embeddings...")
             self.ai_gateway = AIGateway()
         
         # Init ChromaDB
@@ -68,7 +68,7 @@ class AzurLaneVectorizer:
             logger.info(f"Embedding batch of {len(ids)} items locally...")
             embeddings = self.model.encode(documents, batch_size=BATCH_SIZE, show_progress_bar=True).tolist()
         else:
-            logger.info(f"Embedding batch of {len(ids)} items via NVIDIA API...")
+            logger.info(f"Embedding batch of {len(ids)} items via Cloudflare Worker...")
             embeddings = self.ai_gateway.embeddings(documents)
         
         collection.upsert(
@@ -239,7 +239,7 @@ class AzurLaneVectorizer:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Azur Lane Vectorizer")
-    parser.add_argument("--local", action="store_true", help="Use local SentenceTransformer instead of NVIDIA API")
+    parser.add_argument("--local", action="store_true", help="Use local SentenceTransformer instead of Cloudflare Worker")
     args = parser.parse_args()
 
     vectorizer = AzurLaneVectorizer(use_local=args.local)

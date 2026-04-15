@@ -1,7 +1,14 @@
 import json
 import logging
 import os
+import sys
 from pathlib import Path
+
+# Ensure project root is in sys.path when running this file directly.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.utils.ai_gateway import AIGateway
 from src.core.thinker_executor import ThinkerExecutor
 from src.utils.prompts import DISPATCHER_PROMPT, THINKER_PROMPT, SYNTHESIZER_PROMPT
