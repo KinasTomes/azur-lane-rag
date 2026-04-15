@@ -3,15 +3,14 @@ import json
 import logging
 import chromadb
 from pathlib import Path
-from sentence_transformers import SentenceTransformer
 from typing import Dict, List, Any
+from src.utils.ai_gateway import AIGateway
 
 # Configuration
 BASE_DIR = Path(__file__).resolve().parents[2]
 SQL_DB_PATH = BASE_DIR / "data" / "azur_lane.db"
 GRAPH_DB_PATH = BASE_DIR / "data" / "azur_lane_graph.db"
 VECTOR_STORE_PATH = BASE_DIR / "data" / "chroma_db"
-MODEL_NAME = "BAAI/bge-m3"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ThinkerExecutor:
     def __init__(self):
         self.chroma_client = chromadb.PersistentClient(path=str(VECTOR_STORE_PATH))
-        self.embed_model = SentenceTransformer(MODEL_NAME)
+        self.ai_gateway = AIGateway()
         
     def _get_db_conn(self, path: Path):
         return sqlite3.connect(path)
@@ -53,7 +52,9 @@ class ThinkerExecutor:
         results = []
         collections = ["community_summaries", "entity_mechanics", "character_lore"]
         
-        query_embedding = self.embed_model.encode(query_text).tolist()
+        # Use AIGateway for embedding
+        embeddings = self.ai_gateway.embeddings([query_text])
+        query_embedding = embeddings[0]
         
         for coll_name in collections:
             try:

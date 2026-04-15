@@ -57,6 +57,22 @@ class AIGateway:
         )
         self.cf_gateway_url = os.getenv("CF_GATEWAY_URL", "http://127.0.0.1:8787")
 
+    def embeddings(self, texts: List[str], model: str = "baai/bge-m3") -> List[List[float]]:
+        """
+        Fetch embeddings from NVIDIA API.
+        """
+        try:
+            response = self.nvidia_client.embeddings.create(
+                input=texts,
+                model=model,
+                encoding_format="float",
+                extra_body={"truncate": "NONE"}
+            )
+            return [data.embedding for data in response.data]
+        except Exception as e:
+            logger.error(f"NVIDIA Embedding Call Failed: {e}")
+            raise
+
     def chat(self, model_id: str, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
         """
         Unified chat interface with automatic fallback logic.

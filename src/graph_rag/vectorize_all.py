@@ -1,16 +1,19 @@
 import sqlite3
 import json
-import os
 import logging
-import torch
+import argparse
 from pathlib import Path
 from dotenv import load_dotenv
+from src.utils.ai_gateway import AIGateway
+
+# Model Config
+MODEL_NAME = "BAAI/bge-m3"
+BATCH_SIZE = 64
 
 try:
-    from sentence_transformers import SentenceTransformer
     import chromadb
 except ImportError:
-    print("Vui lòng cài đặt thư viện cần thiết: pip install sentence-transformers chromadb torch python-dotenv")
+    print("Vui lòng cài đặt thư viện cần thiết: pip install chromadb python-dotenv")
     exit(1)
 
 # Load environment variables
@@ -26,19 +29,24 @@ SQL_DB_PATH = BASE_DIR / "data" / "azur_lane.db"
 GRAPH_DB_PATH = BASE_DIR / "data" / "azur_lane_graph.db"
 VECTOR_STORE_PATH = BASE_DIR / "data" / "chroma_db"
 
-# Model Config
-MODEL_NAME = "BAAI/bge-m3"
-BATCH_SIZE = 64
-
 class AzurLaneVectorizer:
-    def __init__(self):
-        # Kiểm tra CUDA
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {self.device}")
+    def __init__(self, use_local=False):
+        self.use_local = use_local
         
-        # Load model local
-        logger.info(f"Loading model {MODEL_NAME}...")
-        self.model = SentenceTransformer(MODEL_NAME, device=self.device)
+        if use_local:
+            try:
+                import torch
+                from sentence_transformers import SentenceTransformer
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                logger.info(f"Using local model {MODEL_NAME} on device: {device}")
+                self.model = SentenceTransformer(MODEL_NAME, device=device)
+            except ImportError:
+                logger.error("Local mode requires 'sentence-transformers' and 'torch'. Fallback to Cloud.")
+                self.use_local = False
+                self.ai_gateway = AIGateway()
+        else:
+            logger.info("Initializing AI Gateway for NVIDIA remote embeddings...")
+            self.ai_gateway = AIGateway()
         
         # Init ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=str(VECTOR_STORE_PATH))
@@ -56,12 +64,16 @@ class AzurLaneVectorizer:
         """Xử lý và lưu trữ dữ liệu theo batch"""
         if not ids: return
         
-        logger.info(f"Embedding batch of {len(ids)} items...")
-        embeddings = self.model.encode(documents, batch_size=BATCH_SIZE, show_progress_bar=True)
+        if self.use_local:
+            logger.info(f"Embedding batch of {len(ids)} items locally...")
+            embeddings = self.model.encode(documents, batch_size=BATCH_SIZE, show_progress_bar=True).tolist()
+        else:
+            logger.info(f"Embedding batch of {len(ids)} items via NVIDIA API...")
+            embeddings = self.ai_gateway.embeddings(documents)
         
         collection.upsert(
             ids=ids,
-            embeddings=embeddings.tolist(),
+            embeddings=embeddings,
             metadatas=metadatas,
             documents=documents
         )
@@ -226,7 +238,11 @@ class AzurLaneVectorizer:
         conn.close()
 
 if __name__ == "__main__":
-    vectorizer = AzurLaneVectorizer()
+    parser = argparse.ArgumentParser(description="Azur Lane Vectorizer")
+    parser.add_argument("--local", action="store_true", help="Use local SentenceTransformer instead of NVIDIA API")
+    args = parser.parse_args()
+
+    vectorizer = AzurLaneVectorizer(use_local=args.local)
     
     # 1. Communities (Graph)
     vectorizer.vectorize_communities()
