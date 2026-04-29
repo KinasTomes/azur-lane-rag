@@ -21,6 +21,7 @@ class AIGateway:
     # Model Mappings based on temp.md + User Updates
     NVIDIA_MODELS = {
         "qwen3.5_397b": "qwen/qwen3.5-397b-a17b",
+        "qwen3_5_397b": "qwen/qwen3.5-397b-a17b", # Unified mapping for underscore variant
         "ds_r1_qwen_32b": "deepseek-ai/deepseek-r1-distill-qwen-32b",
         "qwen3_80b_thinking": "qwen/qwen3-next-80b-a3b-thinking",
         "nemotron_super": "nvidia/nemotron-3-super-120b-a12b",
@@ -28,7 +29,6 @@ class AIGateway:
         "deepseek_v3.2": "deepseek-ai/deepseek-v3.2",
         "minimax_m2.7": "minimaxai/minimax-m2.7",
         "kimi_k2_thinking": "moonshotai/kimi-k2-thinking",
-        "glm_4.7": "z-ai/glm-4.7",
         "kimi_k2.5": "moonshotai/kimi-k2.5"
     }
 

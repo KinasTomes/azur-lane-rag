@@ -1,10 +1,32 @@
 import sqlite3
 import json
+import re
 from pathlib import Path
 
 # Configuration
-DB_NAME = Path(__file__).parent.parent.parent / "src" / "azur_lane.db"
-DATA_DIR = Path(__file__).parent.parent.parent / "AzurLaneData" / "data"
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+DB_NAME = PROJECT_ROOT / "data" / "azur_lane.db"
+DATA_DIR = PROJECT_ROOT / "AzurLaneData" / "data"
+
+def clean_skill_description(description, skill_id, skills_json):
+    """Thay thế $1, $2... bằng giá trị Max Level từ dữ liệu thô"""
+    if not description: return ""
+    
+    skill_data = skills_json.get(str(skill_id), {})
+    values_list = skill_data.get("values") or skill_data.get("variables") or []
+    
+    if not values_list:
+        return description.replace('\n', ' ').strip()
+
+    def replace_var(match):
+        var_index = int(match.group(1)) - 1 
+        if var_index < len(values_list):
+            val_list = values_list[var_index]
+            return str(val_list[-1]) if isinstance(val_list, list) else str(val_list)
+        return match.group(0)
+
+    cleaned = re.sub(r'\$(\d+)', replace_var, description)
+    return cleaned.replace('\n', ' ').strip()
 
 # Mappings from docs/common.md
 RARITIES = {1: "Common (T1)", 2: "Common (T2)", 3: "Rare", 4: "Elite", 5: "Super Rare", 6: "Ultra Rare"}
@@ -237,8 +259,9 @@ def migrate():
     # Migrate Skills
     print("Migrating Skills...")
     for s_id, s_info in skills_data.items():
+        description = clean_skill_description(s_info.get("description"), s_id, skills_data)
         cursor.execute("INSERT OR REPLACE INTO skills VALUES (?, ?, ?)", 
-                       (int(s_id), s_info.get("name"), s_info.get("description")))
+                       (int(s_id), s_info.get("name"), description))
 
     # Migrate Augments
     print("Migrating Augments...")

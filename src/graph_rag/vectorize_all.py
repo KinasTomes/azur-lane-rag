@@ -30,8 +30,9 @@ GRAPH_DB_PATH = BASE_DIR / "data" / "azur_lane_graph.db"
 VECTOR_STORE_PATH = BASE_DIR / "data" / "chroma_db"
 
 class AzurLaneVectorizer:
-    def __init__(self, use_local=False):
+    def __init__(self, use_local=False, force=False):
         self.use_local = use_local
+        self.force = force
         
         if use_local:
             try:
@@ -53,6 +54,8 @@ class AzurLaneVectorizer:
         
     def get_existing_ids(self, collection_name):
         """Lấy danh sách ID đã tồn tại để tránh vectorize lại"""
+        if self.force:
+            return set()
         try:
             collection = self.chroma_client.get_collection(name=collection_name)
             existing = collection.get(include=[])
@@ -64,16 +67,20 @@ class AzurLaneVectorizer:
         """Xử lý và lưu trữ dữ liệu theo batch"""
         if not ids: return
         
+        all_embeddings = []
         if self.use_local:
             logger.info(f"Embedding batch of {len(ids)} items locally...")
-            embeddings = self.model.encode(documents, batch_size=BATCH_SIZE, show_progress_bar=True).tolist()
+            all_embeddings = self.model.encode(documents, batch_size=BATCH_SIZE, show_progress_bar=True).tolist()
         else:
-            logger.info(f"Embedding batch of {len(ids)} items via Cloudflare Worker...")
-            embeddings = self.ai_gateway.embeddings(documents)
+            logger.info(f"Embedding {len(ids)} items via Cloudflare Worker (Batch size: {BATCH_SIZE})...")
+            for i in range(0, len(ids), BATCH_SIZE):
+                batch_docs = documents[i : i + BATCH_SIZE]
+                batch_embeddings = self.ai_gateway.embeddings(batch_docs)
+                all_embeddings.extend(batch_embeddings)
         
         collection.upsert(
             ids=ids,
-            embeddings=embeddings,
+            embeddings=all_embeddings,
             metadatas=metadatas,
             documents=documents
         )
@@ -240,9 +247,10 @@ class AzurLaneVectorizer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Azur Lane Vectorizer")
     parser.add_argument("--local", action="store_true", help="Use local SentenceTransformer instead of Cloudflare Worker")
+    parser.add_argument("--force", action="store_true", help="Force update existing entries in ChromaDB")
     args = parser.parse_args()
 
-    vectorizer = AzurLaneVectorizer(use_local=args.local)
+    vectorizer = AzurLaneVectorizer(use_local=args.local, force=args.force)
     
     # 1. Communities (Graph)
     vectorizer.vectorize_communities()
@@ -251,8 +259,7 @@ if __name__ == "__main__":
     vectorizer.vectorize_skills()
     vectorizer.vectorize_ships_basic()
     
-    # 3. Character Lore (Voice Lines)
-    # Tăng limit lên nếu muốn chạy nhiều hơn, hoặc set None để chạy Full
-    vectorizer.vectorize_voice_lines(limit=50000) 
+    # 3. Character Lore (Voice Lines) - DISABLED for faster re-indexing of skills
+    # vectorizer.vectorize_voice_lines(limit=50000) 
     
     logger.info("Vectorization Process Completed Successfully.")

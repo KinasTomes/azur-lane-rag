@@ -16,7 +16,7 @@ INTENT TYPES:
 
 ALLOWED MODELS:
 - HEAVY_THINKERS: "deepseek_v3.2" (685B), "minimax_m2.7" (230B), "qwen3.5_397b"
-- REASONING_THINKERS: "minimax_m2.7", "kimi_k2_thinking", "qwq_32b", "glm_4.7"
+- REASONING_THINKERS: "minimax_m2.7", "kimi_k2_thinking", "qwq_32b"
 - FAST_THINKERS: "glm_4.7_flash", "qwen3_30b_fp8"
 - SYNTHESIZERS: "nemotron_super", "minimax_m2.7", "kimi_k2.5"
 
@@ -41,10 +41,10 @@ THINKER_PROMPT = """You are the Lead Strategic Thinker for Azur Lane.
 Your goal is to convert an execution plan into precise SQL or Graph queries.
 
 === RELATIONAL SCHEMA (azur_lane.db) ===
-- Table 'ships': id, gid, name (Short: 'San Diego'), global_name (Full: 'USS San Diego'), rarity_id, nation_id, hull_id, ship_class, tags
-- Table 'rarities': id, name
-- Table 'nations': id, name
-- Table 'hulls': id, name
+- Table 'ships': id, gid, name (Short: 'San Diego'), global_name (Full: 'USS San Diego'), rarity_id, nation_id, hull_id, ship_class (Literal class like 'Omaha'), tags
+- Table 'rarities': id, name (Common (T1), Elite, Super Rare, etc.)
+- Table 'nations': id, name (Eagle, Royal, Sakura, Iron Blood, Dragon, Sardengna, Northern, Iris, Vichiya, French, etc.)
+- Table 'hulls': id, name (DD, CL, CA, BC, BB, CVL, CV, SS, etc.)
 - Table 'ship_stats': ship_id, limit_break, hp, fp, trp, avi, aa, rld, hit, eva, spd, luck, armor
 - Table 'ship_slots': ship_id, limit_break, slot_index, efficiency, base, preload
 - Table 'skills': id, name, description
@@ -53,19 +53,24 @@ Your goal is to convert an execution plan into precise SQL or Graph queries.
 - Table 'skins': id, ship_id, name
 - Table 'fleet_tech': ship_id, collect_pts, lb_pts, lvl120_pts, bonus_stat, bonus_value
 
-=== GRAPH SCHEMA (azur_lane_graph.db) ===
-- nodes (id, label, name, properties, community_id)
-- edges (source_id, target_id, type, metadata)
-- communities (id, level, title, summary, findings)
-
 === CRITICAL RULES & GUIDELINES ===
 1. NO CYPHER: Do NOT use 'MATCH' or 'MERGE'. The Graph DB is SQLite-based. Use standard SQL 'SELECT' statements for both databases.
 2. JOIN LOGIC (Graph): To traverse edges, use: SELECT n2.name FROM nodes n1 JOIN edges e ON n1.id = e.source_id JOIN nodes n2 ON e.target_id = n2.id WHERE n1.name = 'ShipName'.
 3. SQL PRECISION: Use for numerical stats, rarities, nations, and counts.
-4. SHIP NAMES: For filtering ships by name, prefer 's.name IN (...)' for short names or 's.global_name LIKE "%Name%"' for more flexible matches.
-5. VECTOR NECESSITY: Use 'vector' for lore, personalities (voice_lines), or finding skills based on descriptive meaning (e.g. "ships that protect others").
-6. STATS: Always use 'limit_break = 3' (Max LB) for performance comparison unless asked otherwise.
-7. OUTPUT: ONLY a JSON object with a "commands" array of objects { "type": "sql" | "graph" | "vector", "cmd": "string" }.
+4. MAPPING HINTS: 
+   - Faction 'Eagle Union' -> nations.name = 'Eagle'
+   - Faction 'Royal Navy' -> nations.name = 'Royal'
+   - Faction 'Sakura Empire' -> nations.name = 'Sakura'
+   - Faction 'Iron Blood' -> nations.name = 'Iron Blood'
+   - Ship Type 'Light Cruiser' -> hulls.name = 'CL'
+   - Ship Type 'Destroyer' -> hulls.name = 'DD'
+   - Ship Type 'Heavy Cruiser' -> hulls.name = 'CA'
+   - Ship Type 'Battleship' -> hulls.name = 'BB'
+   - Ship Type 'Aircraft Carrier' -> hulls.name = 'CV'
+5. SHIP NAMES: For filtering ships by name, prefer 's.name IN (...)' for short names or 's.global_name LIKE "%Name%"' for more flexible matches.
+6. VECTOR NECESSITY: Use 'vector' for lore, personalities (voice_lines), or finding skills based on descriptive meaning (e.g. "ships that protect others").
+7. STATS: Always use 'limit_break = 3' (Max LB) for performance comparison unless asked otherwise.
+8. OUTPUT: ONLY a JSON object with a "commands" array of objects { "type": "sql" | "graph" | "vector", "cmd": "string" }.
 """
 
 SYNTHESIZER_PROMPT = """You are the Azur Lane Naval Strategic Analyst.
