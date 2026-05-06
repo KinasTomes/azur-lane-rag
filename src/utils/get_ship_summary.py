@@ -5,8 +5,7 @@ from pathlib import Path
 
 # Cấu trúc dự án: src/utils/get_ship_summary.py -> parents[2] là root
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# DB đã được migrate vào thư mục src/
-DB_NAME = REPO_ROOT / "src" / "azur_lane.db"
+DB_NAME = REPO_ROOT / "data" / "azur_lane.db"
 DATA_DIR = REPO_ROOT / "AzurLaneData" / "data"
 
 def clean_skill_description(description, skill_id, skills_json):

@@ -224,7 +224,7 @@ Rules:
         import sqlite3
 
         repo_root = Path(__file__).resolve().parents[2]
-        db_path = repo_root / "src" / "azur_lane.db"
+        db_path = repo_root / "data" / "azur_lane.db"
 
         if not db_path.exists():
             logger.warning(f"DB not found at {db_path}, skipping tag injection.")
