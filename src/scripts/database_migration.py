@@ -8,6 +8,85 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 DB_NAME = PROJECT_ROOT / "data" / "azur_lane.db"
 DATA_DIR = PROJECT_ROOT / "AzurLaneData" / "data"
 
+APP_TABLES = [
+    "voice_lines",
+    "skins",
+    "ship_skills",
+    "ship_stats",
+    "ship_slots",
+    "slot_allowed_types",
+    "ghost_equipments",
+    "fleet_tech",
+    "ship_events",
+    "augments",
+    "ships",
+    "skills",
+    "rarities",
+    "nations",
+    "hulls",
+    "equip_types",
+]
+
+EXPECTED_SCHEMAS = {
+    "rarities": [("id", "INTEGER", 1), ("name", "TEXT", 0)],
+    "nations": [("id", "INTEGER", 1), ("name", "TEXT", 0)],
+    "hulls": [("id", "INTEGER", 1), ("name", "TEXT", 0)],
+    "equip_types": [("id", "INTEGER", 1), ("name", "TEXT", 0)],
+    "ships": [
+        ("id", "INTEGER", 1), ("gid", "INTEGER", 0), ("name", "TEXT", 0),
+        ("global_name", "TEXT", 0), ("rarity_id", "INTEGER", 0),
+        ("nation_id", "INTEGER", 0), ("hull_id", "INTEGER", 0),
+        ("ship_class", "TEXT", 0), ("sub_class", "TEXT", 0),
+        ("release_date", "INTEGER", 0), ("icon", "TEXT", 0),
+        ("flags", "INTEGER", 0), ("timer", "TEXT", 0),
+        ("pool_light", "BOOLEAN", 0), ("pool_heavy", "BOOLEAN", 0),
+        ("pool_special", "BOOLEAN", 0), ("limited_event", "TEXT", 0),
+        ("tags", "TEXT", 0),
+    ],
+    "ship_events": [("ship_id", "INTEGER", 1), ("event_name", "TEXT", 2)],
+    "ship_stats": [
+        ("ship_id", "INTEGER", 1), ("limit_break", "INTEGER", 2),
+        ("hp", "INTEGER", 0), ("fp", "INTEGER", 0), ("trp", "INTEGER", 0),
+        ("avi", "INTEGER", 0), ("aa", "INTEGER", 0), ("rld", "INTEGER", 0),
+        ("hit", "INTEGER", 0), ("eva", "INTEGER", 0), ("spd", "INTEGER", 0),
+        ("luck", "INTEGER", 0), ("armor", "INTEGER", 0),
+        ("oil_start", "INTEGER", 0), ("oil_end", "INTEGER", 0),
+    ],
+    "ship_slots": [
+        ("ship_id", "INTEGER", 1), ("limit_break", "INTEGER", 2),
+        ("slot_index", "INTEGER", 3), ("efficiency", "REAL", 0),
+        ("base", "INTEGER", 0), ("preload", "INTEGER", 0),
+        ("parallel", "INTEGER", 0), ("default_equip_id", "INTEGER", 0),
+    ],
+    "slot_allowed_types": [
+        ("ship_id", "INTEGER", 1), ("slot_index", "INTEGER", 2),
+        ("equip_type_id", "INTEGER", 3),
+    ],
+    "ghost_equipments": [
+        ("ship_id", "INTEGER", 0), ("limit_break", "INTEGER", 0),
+        ("equip_id", "INTEGER", 0), ("efficiency", "REAL", 0),
+    ],
+    "fleet_tech": [
+        ("ship_id", "INTEGER", 1), ("collect_pts", "INTEGER", 0),
+        ("lb_pts", "INTEGER", 0), ("lvl120_pts", "INTEGER", 0),
+        ("bonus_stat", "TEXT", 0), ("bonus_value", "INTEGER", 0),
+    ],
+    "skills": [("id", "INTEGER", 1), ("name", "TEXT", 0), ("description", "TEXT", 0)],
+    "ship_skills": [
+        ("ship_id", "INTEGER", 1), ("skill_id", "INTEGER", 2),
+        ("limit_break", "INTEGER", 3),
+    ],
+    "augments": [
+        ("id", "INTEGER", 1), ("name", "TEXT", 0), ("ship_id", "INTEGER", 0),
+        ("skill_upgrade_id", "INTEGER", 0), ("rarity", "INTEGER", 0),
+    ],
+    "voice_lines": [
+        ("id", "INTEGER", 1), ("ship_id", "INTEGER", 0), ("skin_id", "INTEGER", 0),
+        ("type", "TEXT", 0), ("content", "TEXT", 0),
+    ],
+    "skins": [("id", "INTEGER", 1), ("ship_id", "INTEGER", 0), ("name", "TEXT", 0)],
+}
+
 def clean_skill_description(description, skill_id, skills_json):
     """Thay thế $1, $2... bằng giá trị Max Level từ dữ liệu thô"""
     if not description: return ""
@@ -54,24 +133,10 @@ EQUIP_TYPES = {
     18: "Cargo", 20: "Missile", 21: "Fuze AA Gun", 99: "Raid Bomber"
 }
 
-def create_tables(cursor):
-    # Drop existing tables to ensure schema updates
-    cursor.execute("DROP TABLE IF EXISTS voice_lines")
-    cursor.execute("DROP TABLE IF EXISTS skins")
-    cursor.execute("DROP TABLE IF EXISTS ship_skills")
-    cursor.execute("DROP TABLE IF EXISTS ship_stats")
-    cursor.execute("DROP TABLE IF EXISTS ship_slots")
-    cursor.execute("DROP TABLE IF EXISTS slot_allowed_types")
-    cursor.execute("DROP TABLE IF EXISTS ghost_equipments")
-    cursor.execute("DROP TABLE IF EXISTS fleet_tech")
-    cursor.execute("DROP TABLE IF EXISTS ship_events")
-    cursor.execute("DROP TABLE IF EXISTS augments")
-    cursor.execute("DROP TABLE IF EXISTS ships")
-    cursor.execute("DROP TABLE IF EXISTS skills")
-    cursor.execute("DROP TABLE IF EXISTS rarities")
-    cursor.execute("DROP TABLE IF EXISTS nations")
-    cursor.execute("DROP TABLE IF EXISTS hulls")
-    cursor.execute("DROP TABLE IF EXISTS equip_types")
+def create_tables(cursor, drop_existing=False):
+    if drop_existing:
+        for table in APP_TABLES:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
     # Reference tables
     cursor.execute("CREATE TABLE IF NOT EXISTS rarities (id INTEGER PRIMARY KEY, name TEXT)")
@@ -230,10 +295,55 @@ def create_tables(cursor):
         )
     """)
 
+def schema_matches(cursor):
+    for table, expected in EXPECTED_SCHEMAS.items():
+        cursor.execute(f"PRAGMA table_info({table})")
+        actual = [(row[1], row[2].upper(), row[5]) for row in cursor.fetchall()]
+        if actual != expected:
+            return False
+    return True
+
+def delete_ship_related_rows(cursor, ship_id):
+    for table in (
+        "ship_events",
+        "ship_stats",
+        "ship_slots",
+        "slot_allowed_types",
+        "ghost_equipments",
+        "fleet_tech",
+        "ship_skills",
+        "skins",
+        "voice_lines",
+    ):
+        cursor.execute(f"DELETE FROM {table} WHERE ship_id = ?", (ship_id,))
+
+def prune_missing_rows(cursor, table, id_column, active_ids):
+    if not active_ids:
+        cursor.execute(f"DELETE FROM {table}")
+        return
+    placeholders = ",".join("?" for _ in active_ids)
+    cursor.execute(
+        f"DELETE FROM {table} WHERE {id_column} NOT IN ({placeholders})",
+        tuple(active_ids),
+    )
+
 def migrate():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    create_tables(cursor)
+    db_has_schema = all(
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        for table in EXPECTED_SCHEMAS
+    )
+    full_rebuild = not db_has_schema or not schema_matches(cursor)
+    if full_rebuild:
+        print("Schema missing or changed. Rebuilding database from scratch...")
+    else:
+        print("Schema unchanged. Updating database in place...")
+
+    create_tables(cursor, drop_existing=full_rebuild)
 
     # Populate reference tables
     cursor.executemany("INSERT OR REPLACE INTO rarities VALUES (?, ?)", list(RARITIES.items()))
@@ -256,6 +366,22 @@ def migrate():
     words_data = load_json("ships_words.json")
     drops_data = load_json("ship_drops.json")
 
+    source_ship_ids = {int(ship_id) for ship_id in ships_data.keys()}
+    source_skill_ids = {int(skill_id) for skill_id in skills_data.keys()}
+    source_skin_ids = {int(skin_id) for skin_id in skins_data.keys()}
+    source_augment_ids = {int(augment_id) for augment_id in augments_data.keys()}
+
+    if not full_rebuild:
+        cursor.execute("SELECT id FROM ships")
+        existing_ship_ids = {row[0] for row in cursor.fetchall()}
+        for deleted_ship_id in existing_ship_ids - source_ship_ids:
+            delete_ship_related_rows(cursor, deleted_ship_id)
+            cursor.execute("DELETE FROM ships WHERE id = ?", (deleted_ship_id,))
+
+        prune_missing_rows(cursor, "skills", "id", source_skill_ids)
+        prune_missing_rows(cursor, "skins", "id", source_skin_ids)
+        prune_missing_rows(cursor, "augments", "id", source_augment_ids)
+
     # Migrate Skills
     print("Migrating Skills...")
     for s_id, s_info in skills_data.items():
@@ -276,6 +402,9 @@ def migrate():
     for ship_id_str, ship in ships_data.items():
         ship_id = int(ship_id_str)
         drop_info = drops_data.get(ship_id_str, {})
+
+        if not full_rebuild:
+            delete_ship_related_rows(cursor, ship_id)
         
         # Main ship info
         cursor.execute("""
