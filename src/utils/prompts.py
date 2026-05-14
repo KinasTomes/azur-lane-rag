@@ -15,10 +15,10 @@ INTENT TYPES:
 - meta_comparison: Comparing performance or efficiency between multiple entities.
 
 ALLOWED MODELS:
-- HEAVY_THINKERS: "deepseek_v3.2" (685B), "minimax_m2.7" (230B), "qwen3.5_397b"
-- REASONING_THINKERS: "minimax_m2.7", "kimi_k2_thinking", "qwq_32b"
+- HEAVY_THINKERS: "deepseek_v4_pro" (685B), "minimax_m2.7" (230B), "qwen3.5_397b"
+- REASONING_THINKERS: "minimax_m2.7", "qwq_32b", "mimo_v2_5_pro"
 - FAST_THINKERS: "glm_4.7_flash", "qwen3_30b_fp8"
-- SYNTHESIZERS: "nemotron_super", "minimax_m2.7", "kimi_k2.5"
+- SYNTHESIZERS: "nemotron_super", "mimo_v2_5_pro", "qwen3_30b_fp8"
 
 OUTPUT SCHEMA (STRICT JSON):
 {
