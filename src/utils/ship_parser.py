@@ -4,8 +4,8 @@ import re
 import time
 import logging
 from typing import List, Dict, Any, Iterator, Optional
-from openai import OpenAI
 from dotenv import load_dotenv
+from src.utils.ai_gateway import AIGateway
 
 # Load .env file if exists
 load_dotenv()
@@ -58,35 +58,21 @@ Rules:
         self.api_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("NVIDIA_API_KEY")
         self.base_url = base_url or os.getenv("LLM_BASE_URL") or "https://integrate.api.nvidia.com/v1"
         self.model = model or os.getenv("LLM_MODEL") or "deepseek-ai/deepseek-v3.1"
+        self.gateway = AIGateway()
         
         if not self.api_key:
             logger.warning("LLM_API_KEY or NVIDIA_API_KEY is not set.")
 
-        self.client = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key
+    def _send_to_llm(self, messages: List[Dict[str, str]], max_retries: int = 3) -> List[Dict[str, Any]]:
+        """Gửi yêu cầu đến LLM API qua AIGateway với cơ chế retry."""
+        return self.gateway.chat_array(
+            self.model,
+            messages,
+            max_retries=max_retries,
+            temperature=0.1,
+            top_p=0.95,
+            max_tokens=8192,
         )
-
-    def _send_to_llm(self, messages: List[Dict[str, str]], max_retries: int = 3) -> str:
-        """Gửi yêu cầu đến LLM API với cơ chế retry."""
-        for attempt in range(max_retries):
-            try:
-                completion = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=0.1,
-                    top_p=0.95,
-                    max_tokens=8192,
-                    stream=False
-                )
-                return completion.choices[0].message.content
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Retrying API call ({attempt + 1}/{max_retries}) due to: {e}")
-                    time.sleep(2 ** attempt)
-                    continue
-                raise e
-        raise Exception("Failed after retries.")
 
     def _extract_balanced_json_fragment(self, text: str, start_index: int) -> Optional[str]:
         opening = text[start_index]
@@ -194,9 +180,7 @@ Rules:
             response = self._send_to_llm(messages, max_retries)
             logger.info(f"Done! ({time.time() - start_time:.2f}s)")
             
-            # Phân tích kết quả từ LLM (chỉ chứa skills)
-            llm_results = self._parse_response(response)
-            llm_results_map = {item["id"]: item["skills"] for item in llm_results if "id" in item}
+            llm_results_map = {item["id"]: item["skills"] for item in response if isinstance(item, dict) and "id" in item}
             
             # Gộp Hard Data với Skill Reasoning
             final_ships = []

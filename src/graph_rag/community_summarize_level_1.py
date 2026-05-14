@@ -8,7 +8,7 @@ import hashlib
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from src.utils.ai_gateway import AIGateway
 
 
 # Load environment variables from .env file
@@ -57,9 +57,7 @@ api_key = os.getenv("ANTHROPIC_API_KEY")
 base_url = os.getenv("ANTHROPIC_BASE_URL")
 model_name = os.getenv("ANTHROPIC_BASE_MODEL")
 
-client = OpenAI(api_key=api_key, base_url=base_url)
-MAX_RETRIES = 3
-RETRY_BACKOFF_SECONDS = 2
+ai_gateway = AIGateway()
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = BASE_DIR / "data" / "azur_lane_graph.db"
@@ -252,65 +250,39 @@ def summarize_level1(conn, level1_db_id, compressed_data, content_hash=None):
 }}
 """
 
-    last_error = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        logger.info(
-            "Summarizing Level 1 Community ID: %s (attempt %s/%s)...",
-            level1_db_id,
-            attempt,
-            MAX_RETRIES,
-        )
-        try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a helpful AI that returns ONLY valid JSON objects built from the provided schema.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=8192 * 2,
-                temperature=0.1,
-            )
+    logger.info("Summarizing Level 1 Community ID: %s...", level1_db_id)
+    parsed = ai_gateway.chat_object(
+        model_name or os.getenv("LLM_MODEL") or "deepseek-ai/deepseek-v3.1",
+        [
+            {
+                "role": "system",
+                "content": "You are a helpful AI that returns ONLY valid JSON objects built from the provided schema.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        max_retries=3,
+        max_tokens=8192 * 2,
+        temperature=0.1,
+    )
 
-            content = response.choices[0].message.content or ""
-            parsed = parse_llm_json_object(content)
+    title = parsed.get("title", f"Level 1 Community {level1_db_id}")
+    summary = parsed.get("summary", "")
+    findings = json.dumps(parsed.get("findings", []), ensure_ascii=False)
+    full_content = compressed_data
 
-            title = parsed.get("title", f"Level 1 Community {level1_db_id}")
-            summary = parsed.get("summary", "")
-            findings = json.dumps(parsed.get("findings", []), ensure_ascii=False)
-            full_content = compressed_data
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE communities
+        SET title = ?, summary = ?, findings = ?, full_content = ?, content_hash = ?
+        WHERE id = ? AND level = 1
+        """,
+        (title, summary, findings, full_content, content_hash, level1_db_id),
+    )
+    conn.commit()
 
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE communities
-                SET title = ?, summary = ?, findings = ?, full_content = ?, content_hash = ?
-                WHERE id = ? AND level = 1
-                """,
-                (title, summary, findings, full_content, content_hash, level1_db_id),
-            )
-            conn.commit()
-
-            logger.info("Updated Level 1 Community ID: %s", level1_db_id)
-            time.sleep(2)
-            return
-        except Exception as error:
-            last_error = error
-            logger.warning(
-                "Level 1 Community %s attempt %s/%s failed: %s",
-                level1_db_id,
-                attempt,
-                MAX_RETRIES,
-                error,
-            )
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
-
-    raise RuntimeError(
-        f"Failed to process Level 1 Community ID {level1_db_id} after {MAX_RETRIES} attempts"
-    ) from last_error
+    logger.info("Updated Level 1 Community ID: %s", level1_db_id)
+    time.sleep(2)
 
 
 def main():
@@ -318,8 +290,8 @@ def main():
         logger.error(f"Database not found: {DB_PATH}")
         return
 
-    if not api_key:
-        logger.error("Missing ANTHROPIC_API_KEY in .env")
+    if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("NVIDIA_API_KEY") or os.getenv("LLM_API_KEY")):
+        logger.error("Missing API key in .env")
         return
 
     conn = sqlite3.connect(DB_PATH)

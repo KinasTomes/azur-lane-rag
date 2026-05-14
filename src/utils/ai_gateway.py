@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import time
+import re
 import requests
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -55,6 +57,15 @@ class AIGateway:
             api_key=os.getenv("THIRD_PARTY_API_KEY"),
             max_retries=3
         )
+        legacy_api_key = os.getenv("LLM_API_KEY") or os.getenv("NVIDIA_API_KEY")
+        legacy_base_url = os.getenv("LLM_BASE_URL") or "https://integrate.api.nvidia.com/v1"
+        self.legacy_client = None
+        if legacy_api_key:
+            self.legacy_client = OpenAI(
+                base_url=legacy_base_url,
+                api_key=legacy_api_key,
+                max_retries=3
+            )
         self.cf_gateway_url = os.getenv("CF_GATEWAY_URL", "http://127.0.0.1:8787")
 
     def embeddings(self, texts: List[str], model: str = "bge-m3") -> List[List[float]]:
@@ -112,7 +123,62 @@ class AIGateway:
         if model_id in self.CF_MODELS or model_id.startswith("@cf/"):
             return self._call_cloudflare(model_id, messages, **kwargs)
 
+        if self.legacy_client is not None:
+            return self._call_openai_compatible(
+                client=self.legacy_client,
+                model=model_id,
+                messages=messages,
+                **kwargs
+            )
+
         raise ValueError(f"Unknown model_id: {model_id}. Check mappings in AIGateway.")
+
+    def chat_json(
+        self,
+        model_id: str,
+        messages: List[Dict[str, str]],
+        expect: str = "object",
+        max_retries: int = 3,
+        **kwargs,
+    ) -> Any:
+        """
+        Call a chat model and parse the response as JSON.
+        expect: "object" or "array"
+        """
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.chat(model_id, messages, **kwargs)
+                content = response.get("content") or ""
+                parsed = self._parse_json_response(content, expect=expect)
+                return parsed
+            except Exception as error:
+                last_error = error
+                if attempt < max_retries:
+                    logger.warning(
+                        "Retrying parsed JSON call (%s/%s) for model %s due to: %s",
+                        attempt,
+                        max_retries,
+                        model_id,
+                        error,
+                    )
+                    time.sleep(2 ** (attempt - 1))
+                    continue
+                raise
+
+        raise RuntimeError(f"Failed after {max_retries} JSON parsing attempts.") from last_error
+
+    def chat_object(self, model_id: str, messages: List[Dict[str, str]], max_retries: int = 3, **kwargs) -> Dict[str, Any]:
+        result = self.chat_json(model_id, messages, expect="object", max_retries=max_retries, **kwargs)
+        if not isinstance(result, dict):
+            raise ValueError(f"Expected JSON object from model {model_id}, got {type(result).__name__}")
+        return result
+
+    def chat_array(self, model_id: str, messages: List[Dict[str, str]], max_retries: int = 3, **kwargs) -> List[Any]:
+        result = self.chat_json(model_id, messages, expect="array", max_retries=max_retries, **kwargs)
+        if not isinstance(result, list):
+            raise ValueError(f"Expected JSON array from model {model_id}, got {type(result).__name__}")
+        return result
 
     def _call_openai_compatible(self, client: OpenAI, model: str, messages: List[Dict], **kwargs) -> Dict:
         try:
@@ -191,6 +257,98 @@ class AIGateway:
         except Exception as e:
             logger.error(f"Cloudflare Gateway Call Failed: {e}")
             raise
+
+    def _extract_balanced_json_fragment(self, text: str, start_index: int) -> Optional[str]:
+        opening = text[start_index]
+        if opening not in "[{":
+            return None
+
+        stack: List[str] = []
+        in_string = False
+        escape_next = False
+
+        for index in range(start_index, len(text)):
+            char = text[index]
+
+            if in_string:
+                if escape_next:
+                    escape_next = False
+                elif char == "\\":
+                    escape_next = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                continue
+
+            if char == "{":
+                stack.append("}")
+            elif char == "[":
+                stack.append("]")
+            elif char in "}]":
+                if not stack or char != stack[-1]:
+                    return None
+                stack.pop()
+                if not stack:
+                    return text[start_index:index + 1]
+
+        return None
+
+    def _iter_json_candidates(self, response_text: str):
+        fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", response_text, flags=re.DOTALL | re.IGNORECASE)
+        for block in fenced_blocks:
+            block = block.strip()
+            if block:
+                yield block
+
+        stripped_text = response_text.strip()
+        if stripped_text:
+            yield stripped_text
+
+        for match in re.finditer(r"[\[{]", response_text):
+            fragment = self._extract_balanced_json_fragment(response_text, match.start())
+            if fragment:
+                yield fragment
+
+    def _unwrap_json_payload(self, parsed_data: Any, expect: str) -> Any:
+        if expect == "array":
+            current = parsed_data
+            while isinstance(current, dict):
+                for key in ("ships", "data", "results", "items"):
+                    value = current.get(key)
+                    if isinstance(value, list):
+                        return value
+                    if isinstance(value, dict):
+                        current = value
+                        break
+                else:
+                    break
+            return current
+
+        return parsed_data
+
+    def _parse_json_response(self, response_text: str, expect: str = "object") -> Any:
+        if expect not in {"object", "array"}:
+            raise ValueError(f"Unsupported JSON expectation: {expect}")
+
+        last_error: Optional[Exception] = None
+        for candidate in self._iter_json_candidates(response_text):
+            try:
+                parsed_data = json.loads(candidate)
+                parsed_data = self._unwrap_json_payload(parsed_data, expect)
+                if expect == "object" and not isinstance(parsed_data, dict):
+                    raise ValueError(f"Expected JSON object, got {type(parsed_data).__name__}")
+                if expect == "array" and not isinstance(parsed_data, list):
+                    raise ValueError(f"Expected JSON array, got {type(parsed_data).__name__}")
+                return parsed_data
+            except (json.JSONDecodeError, ValueError) as error:
+                last_error = error
+
+        if last_error:
+            raise ValueError(f"Invalid JSON from model: {last_error}")
+        raise ValueError("No valid JSON object found in model response")
 
 if __name__ == "__main__":
     # Quick Test

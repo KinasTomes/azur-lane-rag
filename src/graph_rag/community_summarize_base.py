@@ -3,15 +3,9 @@ import json
 import os
 import time
 import logging
-import re
 import hashlib
-
-try:
-    from openai import OpenAI
-    from dotenv import load_dotenv
-except ImportError:
-    print("Vui lòng cài đặt thư viện cần thiết: pip install openai python-dotenv")
-    exit(1)
+from dotenv import load_dotenv
+from src.utils.ai_gateway import AIGateway
 
 # Load environment variables from .env file
 load_dotenv()
@@ -50,91 +44,8 @@ class ColorFormatter(logging.Formatter):
 for handler in logging.root.handlers:
     handler.setFormatter(ColorFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
 
-# Khởi tạo OpenAI client (Sử dụng cấu hình từ .env)
-api_key = os.getenv("ANTHROPIC_API_KEY")
-base_url = os.getenv("ANTHROPIC_BASE_URL")
-model_name = os.getenv("ANTHROPIC_BASE_MODEL")
+ai_gateway = AIGateway()
 
-client = OpenAI(
-    api_key=api_key,
-    base_url=base_url
-)
-MAX_RETRIES = 3
-RETRY_BACKOFF_SECONDS = 2
-
-
-def extract_balanced_json_fragment(text, start_index):
-    opening = text[start_index]
-    if opening not in "[{":
-        return None
-
-    stack = []
-    in_string = False
-    escape_next = False
-
-    for index in range(start_index, len(text)):
-        char = text[index]
-
-        if in_string:
-            if escape_next:
-                escape_next = False
-            elif char == "\\":
-                escape_next = True
-            elif char == '"':
-                in_string = False
-            continue
-
-        if char == '"':
-            in_string = True
-            continue
-
-        if char == "{":
-            stack.append("}")
-        elif char == "[":
-            stack.append("]")
-        elif char in "}]":
-            if not stack or char != stack[-1]:
-                return None
-            stack.pop()
-            if not stack:
-                return text[start_index:index + 1]
-
-    return None
-
-
-def parse_llm_json_object(response_text):
-    candidates = []
-
-    # 1) JSON trong code fence ```json ... ```
-    fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", response_text, flags=re.DOTALL | re.IGNORECASE)
-    for block in fenced_blocks:
-        block = block.strip()
-        if block:
-            candidates.append(block)
-
-    # 2) Toàn bộ nội dung sau khi strip
-    stripped = response_text.strip()
-    if stripped:
-        candidates.append(stripped)
-
-    # 3) Tìm fragment JSON cân bằng đầu tiên
-    for match in re.finditer(r"[\[{]", response_text):
-        fragment = extract_balanced_json_fragment(response_text, match.start())
-        if fragment:
-            candidates.append(fragment)
-
-    last_error = None
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError as error:
-            last_error = error
-
-    if last_error:
-        raise ValueError(f"Invalid JSON from LLM: {last_error}")
-    raise ValueError("No valid JSON object found in LLM response")
 
 def get_strategic_summary(conn, community_id):
     """
@@ -245,63 +156,36 @@ def update_community_summary(conn, community_id, compressed_data, content_hash=N
 }}
 """
 
-    last_error = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        logger.info(
-            "Calling LLM for Community ID: %s (attempt %s/%s)...",
-            community_id,
-            attempt,
-            MAX_RETRIES,
-        )
-        try:
-            response = client.chat.completions.create(
-                model=model_name, # Sử dụng model từ biến môi trường
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI that returns ONLY valid JSON objects built from the provided schema."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=8192 * 2,
-                temperature=0.1
-            )
+    logger.info(f"Calling LLM for Community ID: {community_id}...")
+    result = ai_gateway.chat_object(
+        os.getenv("ANTHROPIC_BASE_MODEL") or os.getenv("LLM_MODEL") or "deepseek-ai/deepseek-v3.1",
+        [
+            {"role": "system", "content": "You are a helpful AI that returns ONLY valid JSON objects built from the provided schema."},
+            {"role": "user", "content": prompt},
+        ],
+        max_retries=3,
+        max_tokens=8192 * 2,
+        temperature=0.1,
+    )
 
-            content = response.choices[0].message.content or ""
-            result = parse_llm_json_object(content)
+    title = result.get('title', f"Community {community_id}")
+    summary = result.get('summary', "")
+    findings = json.dumps(result.get('findings', []), ensure_ascii=False)
+    full_content = compressed_data
 
-            title = result.get('title', f"Community {community_id}")
-            summary = result.get('summary', "")
-            findings = json.dumps(result.get('findings', []), ensure_ascii=False)
-            full_content = compressed_data
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        UPDATE communities
+        SET title = ?, summary = ?, findings = ?, full_content = ?, content_hash = ?
+        WHERE id = ? AND level = 0
+        ''',
+        (title, summary, findings, full_content, content_hash, community_id),
+    )
+    conn.commit()
 
-            cursor = conn.cursor()
-            cursor.execute(
-                '''
-                UPDATE communities
-                SET title = ?, summary = ?, findings = ?, full_content = ?, content_hash = ?
-                WHERE id = ? AND level = 0
-                ''',
-                (title, summary, findings, full_content, content_hash, community_id),
-            )
-            conn.commit()
-
-            logger.info("Successfully updated Community ID: %s", community_id)
-            time.sleep(2)
-            return
-
-        except Exception as error:
-            last_error = error
-            logger.warning(
-                "Community %s attempt %s/%s failed: %s",
-                community_id,
-                attempt,
-                MAX_RETRIES,
-                error,
-            )
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
-
-    raise RuntimeError(
-        f"Failed to process Community ID {community_id} after {MAX_RETRIES} attempts"
-    ) from last_error
+    logger.info("Successfully updated Community ID: %s", community_id)
+    time.sleep(2)
 
 def main():
     db_path = 'data/azur_lane_graph.db'
@@ -309,9 +193,8 @@ def main():
         logger.error(f"Không tìm thấy Database tại {db_path}!")
         return
         
-    # Kiểm tra Key Anthropic
-    if not api_key:
-        logger.error("Không tìm thấy ANTHROPIC_API_KEY trong file .env. Vui lòng thiết lập biến này để tiếp tục.")
+    if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("NVIDIA_API_KEY") or os.getenv("LLM_API_KEY")):
+        logger.error("Không tìm thấy API key phù hợp trong file .env. Vui lòng thiết lập biến này để tiếp tục.")
         return
         
     conn = sqlite3.connect(db_path)
