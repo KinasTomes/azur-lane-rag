@@ -138,7 +138,7 @@ def main(max_batches: Optional[int] = None, parallel: bool = False, workers: int
         if ship_id is None:
             pending_summaries.append(summary)
             continue
-            
+
         try:
             ship_id_int = int(ship_id)
             if ship_id_int in indexed_ship_ids:
@@ -148,7 +148,19 @@ def main(max_batches: Optional[int] = None, parallel: bool = False, workers: int
 
         pending_summaries.append(summary)
 
-    logger.info(f"Total ships: {len(summaries)} | Indexed: {len(indexed_ship_ids)} | Pending: {len(pending_summaries)}")
+    is_init = len(indexed_ship_ids) == 0
+    mode = "INIT" if is_init else "UPDATE"
+    logger.info(f"[{mode}] DB ships: {len(summaries)} | Already indexed: {len(indexed_ship_ids)} | Pending: {len(pending_summaries)}")
+
+    if not is_init and pending_summaries:
+        new_ships = []
+        for s in pending_summaries:
+            sid = s.get("id", "?")
+            name = s.get("hard_data", {}).get("name", "Unknown")
+            new_ships.append(f"{sid} ({name})")
+        logger.info(f"[UPDATE] New ships to process: {', '.join(new_ships)}")
+    elif not pending_summaries:
+        logger.info(f"[{mode}] No new ships to process. All up to date.")
 
     # Chia batch
     batch_size = 5
