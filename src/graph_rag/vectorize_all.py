@@ -5,17 +5,10 @@ import logging
 import argparse
 from pathlib import Path
 from dotenv import load_dotenv
-from src.utils.ai_gateway import AIGateway
 
 # Model Config
 MODEL_NAME = "BAAI/bge-m3"
 BATCH_SIZE = 64
-
-try:
-    import chromadb
-except ImportError:
-    print("Vui lòng cài đặt thư viện cần thiết: pip install chromadb python-dotenv")
-    exit(1)
 
 # Load environment variables
 load_dotenv()
@@ -34,22 +27,13 @@ class AzurLaneVectorizer:
     def __init__(self, use_local=False, force=False):
         self.use_local = use_local
         self.force = force
-        
-        if use_local:
-            try:
-                import torch
-                from sentence_transformers import SentenceTransformer
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                logger.info(f"Using local model {MODEL_NAME} on device: {device}")
-                self.model = SentenceTransformer(MODEL_NAME, device=device)
-            except ImportError:
-                logger.error("Local mode requires 'sentence-transformers' and 'torch'. Fallback to Cloud.")
-                self.use_local = False
-                self.ai_gateway = AIGateway()
-        else:
-            logger.info("Initializing AI Gateway for Cloudflare remote embeddings...")
-            self.ai_gateway = AIGateway()
-        
+        self.model = None
+        self.ai_gateway = None
+        try:
+            import chromadb
+        except ImportError as error:
+            raise ImportError("Missing dependency 'chromadb'. Install requirements before vectorization.") from error
+
         # Init ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=str(VECTOR_STORE_PATH))
         
@@ -84,7 +68,10 @@ class AzurLaneVectorizer:
 
     def process_batch(self, collection, ids, documents, metadatas):
         """Xử lý và lưu trữ dữ liệu theo batch"""
-        if not ids: return
+        if not ids:
+            return
+
+        self._ensure_embedding_backend()
         
         all_embeddings = []
         if self.use_local:
@@ -103,6 +90,27 @@ class AzurLaneVectorizer:
             metadatas=metadatas,
             documents=documents
         )
+
+    def _ensure_embedding_backend(self):
+        if self.use_local:
+            if self.model is not None:
+                return
+            try:
+                import torch
+                from sentence_transformers import SentenceTransformer
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                logger.info(f"Using local model {MODEL_NAME} on device: {device}")
+                self.model = SentenceTransformer(MODEL_NAME, device=device)
+                return
+            except ImportError:
+                logger.error("Local mode requires 'sentence-transformers' and 'torch'. Fallback to Cloud.")
+                self.use_local = False
+
+        if self.ai_gateway is None:
+            from src.utils.ai_gateway import AIGateway
+            logger.info("Initializing AI Gateway for Cloudflare remote embeddings...")
+            self.ai_gateway = AIGateway()
 
     def vectorize_communities(self):
         """Vectorize level 0 & 1 communities từ Graph DB"""

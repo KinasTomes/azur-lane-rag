@@ -59,6 +59,8 @@ client = OpenAI(
     api_key=api_key,
     base_url=base_url
 )
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2
 
 
 def extract_balanced_json_fragment(text, start_index):
@@ -243,45 +245,63 @@ def update_community_summary(conn, community_id, compressed_data, content_hash=N
 }}
 """
 
-    logger.info(f"Calling LLM for Community ID: {community_id}...")
-    try:
-        response = client.chat.completions.create(
-            model=model_name, # Sử dụng model từ biến môi trường
-            messages=[
-                {"role": "system", "content": "You are a helpful AI that returns ONLY valid JSON objects built from the provided schema."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=8192 * 2,
-            temperature=0.1
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        logger.info(
+            "Calling LLM for Community ID: %s (attempt %s/%s)...",
+            community_id,
+            attempt,
+            MAX_RETRIES,
         )
-        
-        content = response.choices[0].message.content or ""
-        result = parse_llm_json_object(content)
-        
-        # Gán kết quả trả về
-        title = result.get('title', f"Community {community_id}")
-        summary = result.get('summary', "")
-        # Chuyển mảng findings về dạng chuỗi JSON cho DB
-        findings = json.dumps(result.get('findings', []), ensure_ascii=False)
-        full_content = compressed_data
-        
-        # Cập nhật thông tin vào DB
-        cursor = conn.cursor()
-        cursor.execute(
-            '''
-            UPDATE communities
-            SET title = ?, summary = ?, findings = ?, full_content = ?, content_hash = ?
-            WHERE id = ? AND level = 0
-            ''',
-            (title, summary, findings, full_content, content_hash, community_id),
-        )
-        conn.commit()
-        
-        logger.info(f"Successfully updated Community ID: {community_id}")
-        time.sleep(2)  # Sleep 2 giây giữa các request
-        
-    except Exception as e:
-        logger.error(f"Failed to process Community ID {community_id}. Error: {e}")
+        try:
+            response = client.chat.completions.create(
+                model=model_name, # Sử dụng model từ biến môi trường
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI that returns ONLY valid JSON objects built from the provided schema."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=8192 * 2,
+                temperature=0.1
+            )
+
+            content = response.choices[0].message.content or ""
+            result = parse_llm_json_object(content)
+
+            title = result.get('title', f"Community {community_id}")
+            summary = result.get('summary', "")
+            findings = json.dumps(result.get('findings', []), ensure_ascii=False)
+            full_content = compressed_data
+
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                UPDATE communities
+                SET title = ?, summary = ?, findings = ?, full_content = ?, content_hash = ?
+                WHERE id = ? AND level = 0
+                ''',
+                (title, summary, findings, full_content, content_hash, community_id),
+            )
+            conn.commit()
+
+            logger.info("Successfully updated Community ID: %s", community_id)
+            time.sleep(2)
+            return
+
+        except Exception as error:
+            last_error = error
+            logger.warning(
+                "Community %s attempt %s/%s failed: %s",
+                community_id,
+                attempt,
+                MAX_RETRIES,
+                error,
+            )
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+
+    raise RuntimeError(
+        f"Failed to process Community ID {community_id} after {MAX_RETRIES} attempts"
+    ) from last_error
 
 def main():
     db_path = 'data/azur_lane_graph.db'

@@ -1,12 +1,46 @@
-import sqlite3
 import json
+import logging
+import sqlite3
 from pathlib import Path
+
 import igraph as ig
 import leidenalg as la
 
 # Cấu hình đường dẫn
 BASE_DIR = Path(__file__).parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "azur_lane_graph.db"
+logger = logging.getLogger(__name__)
+
+
+def _load_existing_level0_signatures(conn):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT n.community_id, n.id
+        FROM nodes n
+        JOIN communities c ON c.id = n.community_id
+        WHERE n.label = 'Ship'
+          AND n.community_id IS NOT NULL
+          AND c.level = 0
+        ORDER BY n.community_id, n.id
+        """
+    )
+
+    grouped = {}
+    for community_id, ship_id in cursor.fetchall():
+        grouped.setdefault(community_id, []).append(ship_id)
+
+    return {
+        tuple(ship_ids): community_id
+        for community_id, ship_ids in grouped.items()
+    }
+
+
+def _build_partition_signature(node_ids):
+    ship_ids = sorted(node_id for node_id in node_ids if node_id.startswith("ship_"))
+    if ship_ids:
+        return tuple(ship_ids)
+    return tuple(sorted(node_ids))
 
 def setup_db_for_communities(conn):
     cursor = conn.cursor()
@@ -14,7 +48,7 @@ def setup_db_for_communities(conn):
     # 1. Thêm cột community_id vào bảng nodes nếu chưa có
     try:
         cursor.execute("ALTER TABLE nodes ADD COLUMN community_id INTEGER")
-        print("Added 'community_id' column to 'nodes' table.")
+        logger.info("Added 'community_id' column to 'nodes' table.")
     except sqlite3.OperationalError:
         # Cột đã tồn tại
         pass
@@ -39,6 +73,10 @@ def setup_db_for_communities(conn):
 
 def run_community_detection(conn):
     cursor = conn.cursor()
+    existing_signatures = _load_existing_level0_signatures(conn)
+    next_community_id = (
+        max(existing_signatures.values(), default=-1) + 1
+    )
     cursor.execute("UPDATE nodes SET community_id = NULL")
     
     # Lấy danh sách tất cả các nốt và id của chúng
@@ -54,21 +92,38 @@ def run_community_detection(conn):
         if src in node_to_idx and tgt in node_to_idx:
             edges_list.append((node_to_idx[src], node_to_idx[tgt]))
 
-    print(f"Building graph with {len(nodes_list)} nodes and {len(edges_list)} edges...")
+    logger.info("Building graph with %s nodes and %s edges...", len(nodes_list), len(edges_list))
     
     # Tạo đồ thị bằng igraph (Leidenalg hoạt động tốt nhất với igraph)
     g = ig.Graph(len(nodes_list), edges_list)
     g.to_undirected() # Community detection thường chạy trên đồ thị vô hướng
 
-    print("Running Leiden algorithm...")
+    logger.info("Running Leiden algorithm...")
     # Chạy thuật toán Leiden (ModularityVertexPartition là mặc định phổ biến)
     partition = la.find_partition(g, la.ModularityVertexPartition)
     
     # 3. Cập nhật community_id vào database
-    print(f"Found {len(partition)} communities. Updating database...")
+    logger.info("Found %s communities. Updating database...", len(partition))
     
+    used_community_ids = set()
+    partitions = []
+    for node_indices in partition:
+        node_ids = [idx_to_node[node_idx] for node_idx in node_indices]
+        signature = _build_partition_signature(node_ids)
+        partitions.append((signature, node_indices))
+
+    partitions.sort(key=lambda item: item[0])
+
     active_community_ids = []
-    for comm_id, node_indices in enumerate(partition):
+    for signature, node_indices in partitions:
+        comm_id = existing_signatures.get(signature)
+        if comm_id is None:
+            while next_community_id in used_community_ids:
+                next_community_id += 1
+            comm_id = next_community_id
+            next_community_id += 1
+
+        used_community_ids.add(comm_id)
         active_community_ids.append(comm_id)
         # Tạo bản ghi trong bảng communities (nếu chưa có)
         cursor.execute('''
@@ -89,7 +144,7 @@ def run_community_detection(conn):
         )
 
     conn.commit()
-    print("Community detection and database updates completed.")
+    logger.info("Community detection and database updates completed.")
 
 
 def get_community_assignments(conn):
@@ -102,7 +157,7 @@ def get_community_assignments(conn):
 
 if __name__ == "__main__":
     if not DB_PATH.exists():
-        print(f"Error: Database {DB_PATH} not found. Please run init_sqlite_graph.py first.")
+        logger.error("Database %s not found. Please run init_sqlite_graph.py first.", DB_PATH)
     else:
         connection = sqlite3.connect(DB_PATH)
         setup_db_for_communities(connection)
