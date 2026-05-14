@@ -27,13 +27,19 @@ def setup_db_for_communities(conn):
             title TEXT,         -- Tên cộng đồng (AI tự đặt, VD: "Biệt đội phòng không Eagle Union")
             summary TEXT,       -- Bản tóm tắt chi tiết (đây là cái để dán vào Prompt)
             findings TEXT,      -- Các phát hiện quan trọng (dạng JSON)
-            full_content TEXT   -- Nội dung gốc để sau này Vector hóa
+            full_content TEXT,  -- Nội dung gốc để sau này Vector hóa
+            content_hash TEXT   -- Hash nội dung để skip re-summarize
         )
     ''')
+    try:
+        cursor.execute("ALTER TABLE communities ADD COLUMN content_hash TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
 
 def run_community_detection(conn):
     cursor = conn.cursor()
+    cursor.execute("UPDATE nodes SET community_id = NULL")
     
     # Lấy danh sách tất cả các nốt và id của chúng
     cursor.execute("SELECT id FROM nodes")
@@ -61,20 +67,38 @@ def run_community_detection(conn):
     # 3. Cập nhật community_id vào database
     print(f"Found {len(partition)} communities. Updating database...")
     
+    active_community_ids = []
     for comm_id, node_indices in enumerate(partition):
+        active_community_ids.append(comm_id)
         # Tạo bản ghi trong bảng communities (nếu chưa có)
         cursor.execute('''
-            INSERT OR IGNORE INTO communities (id, level, title, summary, findings, full_content)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (comm_id, 0, f"Community {comm_id}", "", "[]", ""))
+            INSERT OR IGNORE INTO communities (id, level, title, summary, findings, full_content, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (comm_id, 0, f"Community {comm_id}", "", "[]", "", None))
         
         # Cập nhật từng nốt thuộc cộng đồng này
         for node_idx in node_indices:
             node_id = idx_to_node[node_idx]
             cursor.execute("UPDATE nodes SET community_id = ? WHERE id = ?", (comm_id, node_id))
 
+    if active_community_ids:
+        placeholders = ",".join("?" for _ in active_community_ids)
+        cursor.execute(
+            f"DELETE FROM communities WHERE level = 0 AND id NOT IN ({placeholders})",
+            active_community_ids,
+        )
+
     conn.commit()
     print("Community detection and database updates completed.")
+
+
+def get_community_assignments(conn):
+    """Return {ship_node_id: community_id} for ship nodes after community detection."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, community_id FROM nodes WHERE label = 'Ship' AND community_id IS NOT NULL"
+    )
+    return {node_id: community_id for node_id, community_id in cursor.fetchall()}
 
 if __name__ == "__main__":
     if not DB_PATH.exists():

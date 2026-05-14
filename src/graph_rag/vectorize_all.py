@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import hashlib
 import logging
 import argparse
 from pathlib import Path
@@ -63,6 +64,24 @@ class AzurLaneVectorizer:
         except:
             return set()
 
+    def get_existing_hashes(self, collection_name):
+        """Return {vector_id: content_hash} for skip/update decisions."""
+        if self.force:
+            return {}
+        try:
+            collection = self.chroma_client.get_collection(name=collection_name)
+            existing = collection.get(include=["metadatas"])
+            return {
+                item_id: (metadata or {}).get("content_hash", "")
+                for item_id, metadata in zip(existing["ids"], existing["metadatas"])
+            }
+        except:
+            return {}
+
+    @staticmethod
+    def _compute_hash(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
     def process_batch(self, collection, ids, documents, metadatas):
         """Xử lý và lưu trữ dữ liệu theo batch"""
         if not ids: return
@@ -89,7 +108,7 @@ class AzurLaneVectorizer:
         """Vectorize level 0 & 1 communities từ Graph DB"""
         logger.info("--- Vectorizing Communities from Graph ---")
         collection = self.chroma_client.get_or_create_collection(name="community_summaries")
-        existing_ids = self.get_existing_ids("community_summaries")
+        existing_hashes = self.get_existing_hashes("community_summaries")
         
         conn = sqlite3.connect(GRAPH_DB_PATH)
         cursor = conn.cursor()
@@ -98,13 +117,21 @@ class AzurLaneVectorizer:
         rows = cursor.fetchall()
         
         ids, docs, metas = [], [], []
+        new_count, updated_count, skipped_count = 0, 0, 0
         
         for cid, level, title, summary, findings in rows:
             v_id = f"comm_{cid}"
-            if v_id in existing_ids: continue
             if not summary: continue
             
             text = f"Title: {title}\nLevel: {level}\nSummary: {summary}\nKey Findings: {findings}"
+            content_hash = self._compute_hash(text)
+            if existing_hashes.get(v_id) == content_hash:
+                skipped_count += 1
+                continue
+            if v_id in existing_hashes:
+                updated_count += 1
+            else:
+                new_count += 1
             
             # Lấy ship_ids từ Graph
             cursor.execute("SELECT id FROM nodes WHERE community_id = ? AND label = 'Ship'", (cid,))
@@ -116,17 +143,19 @@ class AzurLaneVectorizer:
                 "community_id": cid,
                 "level": level,
                 "title": title,
-                "ship_ids": json.dumps(ship_ids)
+                "ship_ids": json.dumps(ship_ids),
+                "content_hash": content_hash
             })
             
         self.process_batch(collection, ids, docs, metas)
         conn.close()
+        logger.info(f"Communities: {new_count} new, {updated_count} updated, {skipped_count} unchanged")
 
     def vectorize_skills(self):
         """Vectorize skill descriptions từ SQL DB"""
         logger.info("--- Vectorizing Skills from SQL ---")
         collection = self.chroma_client.get_or_create_collection(name="entity_mechanics")
-        existing_ids = self.get_existing_ids("entity_mechanics")
+        existing_hashes = self.get_existing_hashes("entity_mechanics")
         
         conn = sqlite3.connect(SQL_DB_PATH)
         cursor = conn.cursor()
@@ -140,29 +169,40 @@ class AzurLaneVectorizer:
         """)
         
         ids, docs, metas = [], [], []
+        new_count, updated_count, skipped_count = 0, 0, 0
         for sk_id, sk_name, sk_desc, sh_name, sh_id in cursor.fetchall():
             v_id = f"skill_{sk_id}"
-            if v_id in existing_ids: continue
             if not sk_desc: continue
             
             text = f"Skill: {sk_name} (Ship: {sh_name})\nDescription: {sk_desc}"
+            content_hash = self._compute_hash(text)
+            if existing_hashes.get(v_id) == content_hash:
+                skipped_count += 1
+                continue
+            if v_id in existing_hashes:
+                updated_count += 1
+            else:
+                new_count += 1
+
             ids.append(v_id)
             docs.append(text)
             metas.append({
                 "entity_id": sk_id,
                 "type": "skill",
                 "parent_ship_name": sh_name,
-                "parent_ship_id": sh_id
+                "parent_ship_id": sh_id,
+                "content_hash": content_hash
             })
             
         self.process_batch(collection, ids, docs, metas)
         conn.close()
+        logger.info(f"Skills: {new_count} new, {updated_count} updated, {skipped_count} unchanged")
 
     def vectorize_ships_basic(self):
         """Vectorize thông tin cơ bản của tàu cho Entity Search"""
         logger.info("--- Vectorizing Ship Entities from SQL ---")
         collection = self.chroma_client.get_or_create_collection(name="entity_mechanics")
-        existing_ids = self.get_existing_ids("entity_mechanics")
+        existing_hashes = self.get_existing_hashes("entity_mechanics")
         
         conn = sqlite3.connect(SQL_DB_PATH)
         cursor = conn.cursor()
@@ -176,9 +216,9 @@ class AzurLaneVectorizer:
         """)
         
         ids, docs, metas = [], [], []
+        new_count, updated_count, skipped_count = 0, 0, 0
         for sid, name, nation, hull, rarity, tags in cursor.fetchall():
             v_id = f"ship_{sid}"
-            if v_id in existing_ids: continue
             
             raw_tags = json.loads(tags) if tags else []
             tags_list = []
@@ -191,6 +231,14 @@ class AzurLaneVectorizer:
             tags_list = sorted(list(set(str(t) for t in tags_list if t)))
             
             text = f"Ship: {name}\nFaction: {nation}\nHull: {hull}\nRarity: {rarity}\nTags: {', '.join(tags_list)}"
+            content_hash = self._compute_hash(text)
+            if existing_hashes.get(v_id) == content_hash:
+                skipped_count += 1
+                continue
+            if v_id in existing_hashes:
+                updated_count += 1
+            else:
+                new_count += 1
             
             ids.append(v_id)
             docs.append(text)
@@ -199,17 +247,19 @@ class AzurLaneVectorizer:
                 "type": "ship",
                 "name": name,
                 "hull": hull,
-                "nation": nation
+                "nation": nation,
+                "content_hash": content_hash
             })
             
         self.process_batch(collection, ids, docs, metas)
         conn.close()
+        logger.info(f"Ships: {new_count} new, {updated_count} updated, {skipped_count} unchanged")
 
     def vectorize_voice_lines(self, limit=1000):
         """Vectorize lời thoại từ SQL DB"""
         logger.info(f"--- Vectorizing Voice Lines (Limit: {limit}) ---")
         collection = self.chroma_client.get_or_create_collection(name="character_lore")
-        existing_ids = self.get_existing_ids("character_lore")
+        existing_hashes = self.get_existing_hashes("character_lore")
         
         conn = sqlite3.connect(SQL_DB_PATH)
         cursor = conn.cursor()
@@ -225,16 +275,20 @@ class AzurLaneVectorizer:
         ids, docs, metas = [], [], []
         for v_id, content, v_type, s_name, s_id in cursor.fetchall():
             vector_id = f"voice_{v_id}"
-            if vector_id in existing_ids: continue
             
             text = f"{s_name} ({v_type}): {content}"
+            content_hash = self._compute_hash(text)
+            if existing_hashes.get(vector_id) == content_hash:
+                continue
+
             ids.append(vector_id)
             docs.append(text)
             metas.append({
                 "voice_id": v_id,
                 "ship_id": s_id,
                 "ship_name": s_name,
-                "type": v_type
+                "type": v_type,
+                "content_hash": content_hash
             })
             
             if len(ids) >= 1000: # Batch size lớn hơn cho Voice Lines

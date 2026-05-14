@@ -51,6 +51,10 @@ DB_PATH = BASE_DIR / "data" / "azur_lane_graph.db"
 
 def ensure_level1_tables(conn):
     cursor = conn.cursor()
+    try:
+        cursor.execute("ALTER TABLE communities ADD COLUMN content_hash TEXT")
+    except sqlite3.OperationalError:
+        pass
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS community_hierarchy (
@@ -143,24 +147,22 @@ def run_level1_leiden(level0_ids, meta_edges):
 def upsert_level1_structure(conn, level1_groups):
     cursor = conn.cursor()
 
-    # Xoa du lieu level 1 cu de co ket qua idempotent khi chay lai.
+    # Rebuild hierarchy, but keep stable level-1 community ids so summaries can
+    # be skipped by content_hash across reruns.
     cursor.execute("DELETE FROM community_hierarchy WHERE parent_level = 1 AND child_level = 0")
-    cursor.execute("DELETE FROM communities WHERE level = 1")
-
-    cursor.execute("SELECT COALESCE(MAX(id), 0) FROM communities")
-    max_id = cursor.fetchone()[0]
-    next_id = max_id + 1
 
     level1_id_map = {}
+    active_level1_ids = []
     for local_l1_id, child_ids in level1_groups:
-        db_l1_id = next_id
-        next_id += 1
+        db_l1_id = 100000 + local_l1_id
         level1_id_map[local_l1_id] = db_l1_id
+        active_level1_ids.append(db_l1_id)
 
         cursor.execute(
             """
-            INSERT INTO communities (id, level, title, summary, findings, full_content)
-            VALUES (?, 1, ?, '', '[]', '')
+            INSERT OR IGNORE INTO communities
+            (id, level, title, summary, findings, full_content, content_hash)
+            VALUES (?, 1, ?, '', '[]', '', NULL)
             """,
             (db_l1_id, f"Level 1 Community {local_l1_id}"),
         )
@@ -174,6 +176,13 @@ def upsert_level1_structure(conn, level1_groups):
                 """,
                 (db_l1_id, child_id),
             )
+
+    if active_level1_ids:
+        placeholders = ",".join("?" for _ in active_level1_ids)
+        cursor.execute(
+            f"DELETE FROM communities WHERE level = 1 AND id NOT IN ({placeholders})",
+            active_level1_ids,
+        )
 
     conn.commit()
     return level1_id_map

@@ -4,6 +4,7 @@ import os
 import time
 import logging
 import re
+import hashlib
 
 try:
     from openai import OpenAI
@@ -169,7 +170,53 @@ def get_strategic_summary(conn, community_id):
             
     return prompt_ready_text
 
-def update_community_summary(conn, community_id, compressed_data):
+
+def compute_community_content_hash(conn, community_id):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, properties
+        FROM nodes
+        WHERE community_id = ? AND label = 'Ship'
+        ORDER BY id
+        """,
+        (community_id,),
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        return None
+
+    content = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def summarize_community(conn, community_id, force=False):
+    content_hash = compute_community_content_hash(conn, community_id)
+    if content_hash is None:
+        logger.warning(f"Skip Community {community_id}: no ship data.")
+        return False
+
+    if not force:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT content_hash FROM communities WHERE id = ? AND level = 0",
+            (community_id,),
+        )
+        row = cursor.fetchone()
+        if row and row[0] == content_hash:
+            logger.info(f"Community {community_id}: SKIP (unchanged)")
+            return False
+
+    compressed_data = get_strategic_summary(conn, community_id)
+    if not compressed_data:
+        logger.warning(f"Skip Community {community_id}: no prompt data.")
+        return False
+
+    update_community_summary(conn, community_id, compressed_data, content_hash)
+    return True
+
+
+def update_community_summary(conn, community_id, compressed_data, content_hash=None):
     """
     Sử dụng LLM phân tích bản tóm tắt và cập nhật CSDL.
     """
@@ -220,11 +267,14 @@ def update_community_summary(conn, community_id, compressed_data):
         
         # Cập nhật thông tin vào DB
         cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE communities 
-            SET title = ?, summary = ?, findings = ?, full_content = ?
-            WHERE id = ?
-        ''', (title, summary, findings, full_content, community_id))
+        cursor.execute(
+            '''
+            UPDATE communities
+            SET title = ?, summary = ?, findings = ?, full_content = ?, content_hash = ?
+            WHERE id = ? AND level = 0
+            ''',
+            (title, summary, findings, full_content, content_hash, community_id),
+        )
         conn.commit()
         
         logger.info(f"Successfully updated Community ID: {community_id}")
@@ -257,14 +307,7 @@ def main():
         if c_id == 0:
             continue  # Skip community_id = 0 
 
-        # 1. Trích xuất text nén từ DB
-        compressed_data = get_strategic_summary(conn, c_id)
-        
-        # 2. Gửi cho LLM và lưu kết quả lại
-        if compressed_data:
-            update_community_summary(conn, c_id, compressed_data)
-        else:
-            logger.warning(f"Skip Community {c_id}: Không tìm thấy thông tin Ship hợp lệ.")
+        summarize_community(conn, c_id, force=True)
             
     conn.close()
     logger.info("All communities processed.")

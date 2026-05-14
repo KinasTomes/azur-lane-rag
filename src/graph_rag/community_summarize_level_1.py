@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import time
+import hashlib
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -198,7 +199,34 @@ def build_level1_input(level1_db_id, child_ids, level0_map):
     return "\n".join(lines)
 
 
-def summarize_level1(conn, level1_db_id, compressed_data):
+def compute_level1_content_hash(child_ids, level0_map):
+    pairs = []
+    for child_id in sorted(child_ids):
+        item = level0_map.get(child_id, {})
+        text = (item.get("summary") or "") + "\n" + (item.get("findings") or "")
+        pairs.append((child_id, hashlib.sha256(text.encode("utf-8")).hexdigest()))
+    return hashlib.sha256(json.dumps(pairs).encode("utf-8")).hexdigest()
+
+
+def summarize_level1_community(conn, level1_db_id, child_ids, level0_map, force=False):
+    content_hash = compute_level1_content_hash(child_ids, level0_map)
+    if not force:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT content_hash FROM communities WHERE id = ? AND level = 1",
+            (level1_db_id,),
+        )
+        row = cursor.fetchone()
+        if row and row[0] == content_hash:
+            logger.info(f"Level 1 Community {level1_db_id}: SKIP (unchanged)")
+            return False
+
+    compressed_data = build_level1_input(level1_db_id, child_ids, level0_map)
+    summarize_level1(conn, level1_db_id, compressed_data, content_hash)
+    return True
+
+
+def summarize_level1(conn, level1_db_id, compressed_data, content_hash=None):
     prompt = f"""You are a Naval Strategic Analyst specializing in Azur Lane graph synthesis.
 
 ### Input Data:
@@ -248,10 +276,10 @@ def summarize_level1(conn, level1_db_id, compressed_data):
     cursor.execute(
         """
         UPDATE communities
-        SET title = ?, summary = ?, findings = ?, full_content = ?
+        SET title = ?, summary = ?, findings = ?, full_content = ?, content_hash = ?
         WHERE id = ? AND level = 1
         """,
-        (title, summary, findings, full_content, level1_db_id),
+        (title, summary, findings, full_content, content_hash, level1_db_id),
     )
     conn.commit()
 
@@ -283,8 +311,7 @@ def main():
         logger.info(f"Level 1 communities to summarize: {len(parent_to_children)}")
 
         for level1_id, child_ids in parent_to_children.items():
-            compressed_data = build_level1_input(level1_id, child_ids, level0_map)
-            summarize_level1(conn, level1_id, compressed_data)
+            summarize_level1_community(conn, level1_id, child_ids, level0_map, force=True)
 
         logger.info("Level 1 summarization completed.")
     finally:
